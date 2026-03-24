@@ -93,7 +93,7 @@
       const out = { type: seg.type, start_m: Number(seg.start_m), end_m: Number(seg.end_m) };
       if (seg.type === "straight") out.name = seg.name.trim();
       if (seg.type === "corner") {
-        if (seg.name.trim()) out.name = seg.name.trim();
+        out.name = seg.name.trim();
         out.corner_number = Number(seg.corner_number);
       }
       if (seg.type === "complex_corner") {
@@ -163,6 +163,7 @@
       autoAdjust: false,
       errors: {},
       loadModalOpen: false,
+      loadedFileName: "",
     };
 
     function loadInitialState() {
@@ -281,6 +282,7 @@
             segments: loaded,
             errors: validate(loaded),
             loadModalOpen: false,
+            loadedFileName: action.fileName || "",
           };
         }
 
@@ -515,21 +517,21 @@
       const [error, setError] = useState("");
       const fileRef = useRef(null);
 
-      const tryLoad = (jsonStr) => {
+      const tryLoad = (jsonStr, fileName = "") => {
         setError("");
         let data;
         try { data = JSON.parse(jsonStr); }
         catch (ex) { setError("Invalid JSON: " + ex.message); return; }
         const err = validateLoadedData(data);
         if (err) { setError(err); return; }
-        dispatch({ type: "LOAD_JSON", data });
+        dispatch({ type: "LOAD_JSON", data, fileName });
       };
 
       const handleFile = (e) => {
         const file = e.target.files[0];
         if (!file) return;
         const reader = new FileReader();
-        reader.onload = ev => tryLoad(ev.target.result);
+        reader.onload = ev => tryLoad(ev.target.result, file.name);
         reader.readAsText(file);
       };
 
@@ -595,7 +597,7 @@
 
     function App() {
       const [state, dispatch] = useReducer(reducer, undefined, loadInitialState);
-      const { circuitName, circuitNumber, segments, autoAdjust, errors, loadModalOpen } = state;
+      const { circuitName, circuitNumber, segments, autoAdjust, errors, loadModalOpen, loadedFileName } = state;
       // ids: Set of segment _ids to flash; tick increments on every move to restart animation even for same segment
       const [moveAnim, setMoveAnim] = useState({ ids: new Set(), tick: 0 });
       const segmentRefs = useRef({});
@@ -665,11 +667,15 @@
           circuit_number: Number(circuitNumber),
           segments: segments.map(exportSegment),
         };
+        const defaultName = loadedFileName || `${circuitName.trim().replace(/\s+/g, "_")}.json`;
+        const chosenName = prompt("Save as:", defaultName);
+        if (!chosenName) return;
+        const finalName = chosenName.endsWith(".json") ? chosenName : chosenName + ".json";
         const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
         a.href = url;
-        a.download = "track_segments.json";
+        a.download = finalName;
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
