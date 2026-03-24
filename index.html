@@ -1,0 +1,735 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Track Segment Editor – Pits n' Giggles</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body class="bg-gray-50 text-gray-900">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useReducer, useRef } = React;
+
+    // ─── Helpers ────────────────────────────────────────────────────────────────
+
+    let _counter = 0;
+    function makeId() { return `seg_${++_counter}_${Math.random().toString(36).slice(2, 7)}`; }
+
+    function makeSegment(prevEndM = 0, type = "straight") {
+      const start_m = prevEndM;
+      const end_m = start_m + 100;
+      return {
+        _id: makeId(),
+        type,
+        name: "",
+        start_m,
+        end_m,
+        corner_number: "",
+        corner_numbers_raw: "",
+      };
+    }
+
+    function parseCornerNumbers(raw) {
+      return raw.split(",").map(s => s.trim()).filter(s => s !== "").map(Number);
+    }
+
+    // ─── Validation ─────────────────────────────────────────────────────────────
+
+    function validate(segments) {
+      const errors = {}; // { [_id]: { [field]: string } }
+
+      segments.forEach((seg, i) => {
+        const e = {};
+
+        // name required for straight + complex_corner
+        if ((seg.type === "straight" || seg.type === "complex_corner") && !seg.name.trim()) {
+          e.name = "Required";
+        }
+
+        // start_m / end_m required
+        if (seg.start_m === "" || seg.start_m === null || isNaN(Number(seg.start_m))) {
+          e.start_m = "Required";
+        }
+        if (seg.end_m === "" || seg.end_m === null || isNaN(Number(seg.end_m))) {
+          e.end_m = "Required";
+        }
+
+        // range check
+        if (!e.start_m && !e.end_m) {
+          if (Number(seg.start_m) >= Number(seg.end_m)) {
+            e.end_m = "Must be greater than start_m";
+          }
+        }
+
+        // corner_number required for corner
+        if (seg.type === "corner") {
+          if (seg.corner_number === "" || isNaN(Number(seg.corner_number))) {
+            e.corner_number = "Required";
+          }
+        }
+
+        // corner_numbers for complex_corner
+        if (seg.type === "complex_corner") {
+          const nums = parseCornerNumbers(seg.corner_numbers_raw);
+          if (nums.length === 0) {
+            e.corner_numbers = "Required, non-empty";
+          } else if (nums.some(n => !Number.isInteger(n) || isNaN(n))) {
+            e.corner_numbers = "All values must be integers";
+          }
+        }
+
+        // ordering / overlap with previous
+        if (i > 0 && !e.start_m) {
+          const prev = segments[i - 1];
+          if (prev.end_m !== "" && !isNaN(Number(prev.end_m))) {
+            if (Number(seg.start_m) < Number(prev.end_m)) {
+              e.start_m = `Overlaps previous segment (prev end: ${prev.end_m})`;
+            }
+          }
+        }
+
+        if (Object.keys(e).length > 0) errors[seg._id] = e;
+      });
+
+      return errors;
+    }
+
+    // ─── Export ──────────────────────────────────────────────────────────────────
+
+    function exportSegment(seg) {
+      const out = {
+        type: seg.type,
+        start_m: Number(seg.start_m),
+        end_m: Number(seg.end_m),
+      };
+      if (seg.type === "straight") {
+        out.name = seg.name.trim();
+      }
+      if (seg.type === "corner") {
+        if (seg.name.trim()) out.name = seg.name.trim();
+        out.corner_number = Number(seg.corner_number);
+      }
+      if (seg.type === "complex_corner") {
+        out.name = seg.name.trim();
+        out.corner_numbers = parseCornerNumbers(seg.corner_numbers_raw);
+      }
+      return out;
+    }
+
+    function importSegment(seg) {
+      return {
+        _id: makeId(),
+        type: seg.type,
+        name: seg.name || "",
+        start_m: seg.start_m ?? "",
+        end_m: seg.end_m ?? "",
+        corner_number: seg.corner_number ?? "",
+        corner_numbers_raw: Array.isArray(seg.corner_numbers)
+          ? seg.corner_numbers.join(", ")
+          : "",
+      };
+    }
+
+    function validateLoadedData(data) {
+      if (typeof data !== "object" || data === null) return "Root must be an object";
+      if (typeof data.track_length !== "number") return "track_length must be a number";
+      if (!Array.isArray(data.segments)) return "segments must be an array";
+      for (let i = 0; i < data.segments.length; i++) {
+        const s = data.segments[i];
+        if (!["straight", "corner", "complex_corner"].includes(s.type)) {
+          return `Segment ${i}: unknown type "${s.type}"`;
+        }
+      }
+      return null;
+    }
+
+    // ─── Reducer ─────────────────────────────────────────────────────────────────
+
+    const initialState = {
+      trackLength: "",
+      segments: [],
+      autoAdjust: false,
+      errors: {},
+      loadModalOpen: false,
+    };
+
+    function reducer(state, action) {
+      let segments = state.segments;
+
+      switch (action.type) {
+        case "SET_TRACK_LENGTH":
+          return { ...state, trackLength: action.value };
+
+        case "TOGGLE_AUTO_ADJUST":
+          return { ...state, autoAdjust: !state.autoAdjust };
+
+        case "UPDATE_SEGMENT": {
+          const { id, field, value } = action;
+          let updated = segments.map(s =>
+            s._id === id ? { ...s, [field]: value } : s
+          );
+          // auto-adjust: propagate end_m to next start_m
+          if (state.autoAdjust && field === "end_m" && value !== "") {
+            const idx = updated.findIndex(s => s._id === id);
+            if (idx !== -1 && idx < updated.length - 1) {
+              updated = updated.map((s, i) =>
+                i === idx + 1 ? { ...s, start_m: value } : s
+              );
+            }
+          }
+          return { ...state, segments: updated, errors: validate(updated) };
+        }
+
+        case "CHANGE_TYPE": {
+          const { id, newType } = action;
+          const updated = segments.map(s => {
+            if (s._id !== id) return s;
+            return {
+              _id: s._id,
+              type: newType,
+              name: s.name,
+              start_m: s.start_m,
+              end_m: s.end_m,
+              corner_number: "",
+              corner_numbers_raw: "",
+            };
+          });
+          return { ...state, segments: updated, errors: validate(updated) };
+        }
+
+        case "INSERT_ABOVE": {
+          const idx = segments.findIndex(s => s._id === action.id);
+          if (idx === -1) return state;
+          const prevEndM = idx > 0 ? (Number(segments[idx - 1].end_m) || 0) : 0;
+          const newSeg = makeSegment(prevEndM);
+          const updated = [...segments.slice(0, idx), newSeg, ...segments.slice(idx)];
+          return { ...state, segments: updated, errors: validate(updated) };
+        }
+
+        case "INSERT_BELOW": {
+          const idx = segments.findIndex(s => s._id === action.id);
+          if (idx === -1) return state;
+          const prevEndM = Number(segments[idx].end_m) || 0;
+          const newSeg = makeSegment(prevEndM);
+          const updated = [...segments.slice(0, idx + 1), newSeg, ...segments.slice(idx + 1)];
+          return { ...state, segments: updated, errors: validate(updated) };
+        }
+
+        case "ADD_FIRST": {
+          const newSeg = makeSegment(0);
+          return { ...state, segments: [newSeg], errors: validate([newSeg]) };
+        }
+
+        case "ADD_LAST": {
+          const last = segments[segments.length - 1];
+          const prevEndM = last ? (Number(last.end_m) || 0) : 0;
+          const newSeg = makeSegment(prevEndM);
+          const updated = [...segments, newSeg];
+          return { ...state, segments: updated, errors: validate(updated) };
+        }
+
+        case "MOVE_UP": {
+          const idx = segments.findIndex(s => s._id === action.id);
+          if (idx <= 0) return state;
+          const updated = [...segments];
+          [updated[idx - 1], updated[idx]] = [updated[idx], updated[idx - 1]];
+          return { ...state, segments: updated, errors: validate(updated) };
+        }
+
+        case "MOVE_DOWN": {
+          const idx = segments.findIndex(s => s._id === action.id);
+          if (idx === -1 || idx >= segments.length - 1) return state;
+          const updated = [...segments];
+          [updated[idx], updated[idx + 1]] = [updated[idx + 1], updated[idx]];
+          return { ...state, segments: updated, errors: validate(updated) };
+        }
+
+        case "DELETE": {
+          const updated = segments.filter(s => s._id !== action.id);
+          return { ...state, segments: updated, errors: validate(updated) };
+        }
+
+        case "LOAD_JSON": {
+          const loaded = action.data.segments.map(importSegment);
+          return {
+            ...state,
+            trackLength: action.data.track_length,
+            segments: loaded,
+            errors: validate(loaded),
+            loadModalOpen: false,
+          };
+        }
+
+        case "NEW":
+          return { ...initialState };
+
+        case "OPEN_LOAD_MODAL":
+          return { ...state, loadModalOpen: true };
+
+        case "CLOSE_LOAD_MODAL":
+          return { ...state, loadModalOpen: false };
+
+        default:
+          return state;
+      }
+    }
+
+    // ─── Components ──────────────────────────────────────────────────────────────
+
+    function FieldError({ msg }) {
+      if (!msg) return null;
+      return <p className="text-xs text-red-500 mt-0.5">{msg}</p>;
+    }
+
+    function inputCls(hasError) {
+      return `w-full border rounded px-2 py-1 text-sm focus:outline-none focus:ring-1 ${
+        hasError
+          ? "border-red-400 bg-red-50 focus:ring-red-400"
+          : "border-gray-300 focus:ring-blue-400"
+      }`;
+    }
+
+    function TypeSpecificFields({ seg, errors, dispatch }) {
+      if (seg.type === "corner") {
+        return (
+          <div className="mt-3">
+            <label className="block text-xs font-medium text-gray-500 mb-0.5">
+              corner_number <span className="text-red-500">*</span>
+            </label>
+            <input
+              type="number"
+              value={seg.corner_number}
+              className={inputCls(!!errors.corner_number) + " w-32"}
+              onChange={e =>
+                dispatch({ type: "UPDATE_SEGMENT", id: seg._id, field: "corner_number", value: e.target.value })
+              }
+            />
+            <FieldError msg={errors.corner_number} />
+          </div>
+        );
+      }
+
+      if (seg.type === "complex_corner") {
+        const nums = parseCornerNumbers(seg.corner_numbers_raw);
+        const preview =
+          seg.name.trim() && nums.length > 0
+            ? `${seg.name.trim()} (T${nums[0]}–T${nums[nums.length - 1]})`
+            : null;
+
+        return (
+          <div className="mt-3">
+            <label className="block text-xs font-medium text-gray-500 mb-0.5">
+              corner_numbers <span className="text-red-500">*</span>{" "}
+              <span className="font-normal text-gray-400">(comma-separated integers, e.g. 5,6,7)</span>
+            </label>
+            <input
+              type="text"
+              value={seg.corner_numbers_raw}
+              placeholder="5,6,7"
+              className={inputCls(!!errors.corner_numbers)}
+              onChange={e =>
+                dispatch({ type: "UPDATE_SEGMENT", id: seg._id, field: "corner_numbers_raw", value: e.target.value })
+              }
+            />
+            <FieldError msg={errors.corner_numbers} />
+            {nums.length > 0 && !errors.corner_numbers && (
+              <div className="flex flex-wrap gap-1 mt-1.5">
+                {nums.map((n, i) => (
+                  <span key={i} className="bg-blue-100 text-blue-700 text-xs px-2 py-0.5 rounded-full">
+                    T{n}
+                  </span>
+                ))}
+              </div>
+            )}
+            {preview && (
+              <p className="text-xs text-gray-500 italic mt-1">{preview}</p>
+            )}
+          </div>
+        );
+      }
+
+      return null;
+    }
+
+    function SegmentCard({ seg, index, total, errors, dispatch }) {
+      const e = errors[seg._id] || {};
+      const hasError = Object.keys(e).length > 0;
+
+      return (
+        <div
+          className={`bg-white rounded-lg shadow-sm border-l-4 mb-3 overflow-hidden ${
+            hasError ? "border-red-400" : "border-gray-200"
+          }`}
+        >
+          <div className="p-4">
+            {/* Top row: type + name + error badge + delete */}
+            <div className="flex gap-2 items-start mb-3">
+              {/* Type dropdown */}
+              <div className="flex-shrink-0">
+                <label className="block text-xs font-medium text-gray-500 mb-0.5">Type</label>
+                <select
+                  value={seg.type}
+                  className="border border-gray-300 rounded px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400"
+                  onChange={e =>
+                    dispatch({ type: "CHANGE_TYPE", id: seg._id, newType: e.target.value })
+                  }
+                >
+                  <option value="straight">straight</option>
+                  <option value="corner">corner</option>
+                  <option value="complex_corner">complex_corner</option>
+                </select>
+              </div>
+
+              {/* Name */}
+              <div className="flex-1">
+                <label className="block text-xs font-medium text-gray-500 mb-0.5">
+                  Name{" "}
+                  {seg.type === "corner" ? (
+                    <span className="font-normal text-gray-400">(optional)</span>
+                  ) : (
+                    <span className="text-red-500">*</span>
+                  )}
+                </label>
+                <input
+                  type="text"
+                  value={seg.name}
+                  className={inputCls(!!e.name)}
+                  onChange={ev =>
+                    dispatch({ type: "UPDATE_SEGMENT", id: seg._id, field: "name", value: ev.target.value })
+                  }
+                />
+                <FieldError msg={e.name} />
+              </div>
+
+              {/* Badges + delete */}
+              <div className="flex-shrink-0 flex items-center gap-1 pt-5">
+                {hasError && (
+                  <span className="text-xs bg-red-100 text-red-600 px-1.5 py-0.5 rounded-full font-medium">
+                    {Object.keys(e).length} err{Object.keys(e).length > 1 ? "s" : ""}
+                  </span>
+                )}
+                <button
+                  onClick={() => dispatch({ type: "DELETE", id: seg._id })}
+                  className="text-gray-400 hover:text-red-500 transition-colors text-xl leading-none font-bold"
+                  title="Delete segment"
+                >
+                  ×
+                </button>
+              </div>
+            </div>
+
+            {/* Range fields */}
+            <div className="grid grid-cols-2 gap-3 mb-1">
+              <div>
+                <label className="block text-xs font-medium text-gray-500 mb-0.5">
+                  start_m <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="number"
+                  value={seg.start_m}
+                  className={inputCls(!!e.start_m)}
+                  onChange={ev =>
+                    dispatch({ type: "UPDATE_SEGMENT", id: seg._id, field: "start_m", value: ev.target.value })
+                  }
+                />
+                <FieldError msg={e.start_m} />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-500 mb-0.5">
+                  end_m <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="number"
+                  value={seg.end_m}
+                  className={inputCls(!!e.end_m)}
+                  onChange={ev =>
+                    dispatch({ type: "UPDATE_SEGMENT", id: seg._id, field: "end_m", value: ev.target.value })
+                  }
+                />
+                <FieldError msg={e.end_m} />
+              </div>
+            </div>
+
+            {/* Type-specific fields */}
+            <TypeSpecificFields seg={seg} errors={e} dispatch={dispatch} />
+          </div>
+
+          {/* Card footer: actions */}
+          <div className="border-t border-gray-100 bg-gray-50 px-4 py-2 flex gap-1.5 flex-wrap text-xs">
+            <button
+              onClick={() => dispatch({ type: "MOVE_UP", id: seg._id })}
+              disabled={index === 0}
+              className="px-2.5 py-1 border border-gray-300 rounded hover:bg-white disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+              title="Move up"
+            >
+              ↑ Up
+            </button>
+            <button
+              onClick={() => dispatch({ type: "MOVE_DOWN", id: seg._id })}
+              disabled={index === total - 1}
+              className="px-2.5 py-1 border border-gray-300 rounded hover:bg-white disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+              title="Move down"
+            >
+              ↓ Down
+            </button>
+            <span className="border-l border-gray-200 mx-0.5" />
+            <button
+              onClick={() => dispatch({ type: "INSERT_ABOVE", id: seg._id })}
+              className="px-2.5 py-1 border border-green-300 text-green-700 rounded hover:bg-green-50 transition-colors"
+              title="Insert above"
+            >
+              + Above
+            </button>
+            <button
+              onClick={() => dispatch({ type: "INSERT_BELOW", id: seg._id })}
+              className="px-2.5 py-1 border border-green-300 text-green-700 rounded hover:bg-green-50 transition-colors"
+              title="Insert below"
+            >
+              + Below
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    function LoadModal({ dispatch }) {
+      const [text, setText] = useState("");
+      const [error, setError] = useState("");
+      const fileRef = useRef(null);
+
+      const tryLoad = (jsonStr) => {
+        setError("");
+        let data;
+        try {
+          data = JSON.parse(jsonStr);
+        } catch (ex) {
+          setError("Invalid JSON: " + ex.message);
+          return;
+        }
+        const err = validateLoadedData(data);
+        if (err) { setError(err); return; }
+        dispatch({ type: "LOAD_JSON", data });
+      };
+
+      const handleFile = (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = ev => tryLoad(ev.target.result);
+        reader.readAsText(file);
+      };
+
+      return (
+        <div
+          className="fixed inset-0 bg-black/40 flex items-center justify-center z-50"
+          onClick={() => dispatch({ type: "CLOSE_LOAD_MODAL" })}
+        >
+          <div
+            className="bg-white rounded-xl shadow-2xl p-6 w-full max-w-lg mx-4"
+            onClick={e => e.stopPropagation()}
+          >
+            <h2 className="text-lg font-semibold mb-4">Load JSON</h2>
+
+            <div className="mb-4">
+              <label className="block text-sm text-gray-600 mb-1">Upload file</label>
+              <input
+                type="file"
+                accept=".json,application/json"
+                ref={fileRef}
+                onChange={handleFile}
+                className="text-sm text-gray-600"
+              />
+            </div>
+
+            <div className="mb-4">
+              <label className="block text-sm text-gray-600 mb-1">Or paste JSON</label>
+              <textarea
+                value={text}
+                onChange={e => { setText(e.target.value); setError(""); }}
+                rows={8}
+                spellCheck={false}
+                className="w-full border border-gray-300 rounded px-3 py-2 text-sm font-mono focus:outline-none focus:ring-1 focus:ring-blue-400"
+                placeholder={'{"track_length": 5793, "segments": [...]}'}
+              />
+            </div>
+
+            {error && (
+              <div className="mb-3 text-sm text-red-600 bg-red-50 border border-red-200 rounded px-3 py-2">
+                {error}
+              </div>
+            )}
+
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => dispatch({ type: "CLOSE_LOAD_MODAL" })}
+                className="px-4 py-2 border border-gray-300 rounded text-sm hover:bg-gray-100 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => tryLoad(text)}
+                className="px-4 py-2 bg-blue-600 text-white rounded text-sm hover:bg-blue-700 transition-colors"
+              >
+                Load
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function App() {
+      const [state, dispatch] = useReducer(reducer, initialState);
+      const { trackLength, segments, autoAdjust, errors, loadModalOpen } = state;
+
+      const totalErrorCount = Object.keys(errors).length;
+
+      const handleNew = () => {
+        if (segments.length > 0 && !confirm("Start fresh? Unsaved changes will be lost.")) return;
+        dispatch({ type: "NEW" });
+      };
+
+      const handleSave = () => {
+        if (totalErrorCount > 0) {
+          if (!confirm(`There are ${totalErrorCount} segment(s) with validation errors. Export anyway?`)) return;
+        }
+        const payload = {
+          track_length: Number(trackLength) || 0,
+          segments: segments.map(exportSegment),
+        };
+        const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "track_segments.json";
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      };
+
+      return (
+        <div className="min-h-screen bg-gray-50">
+          {/* ── Header bar ── */}
+          <header className="sticky top-0 z-20 bg-white border-b border-gray-200 shadow-sm">
+            <div className="max-w-3xl mx-auto px-4 py-2.5 flex flex-wrap items-center gap-3">
+              <h1 className="font-bold text-gray-800 mr-1">Track Segment Editor</h1>
+
+              <div className="flex gap-2">
+                <button
+                  onClick={handleNew}
+                  className="px-3 py-1.5 border border-gray-300 rounded text-sm hover:bg-gray-100 transition-colors"
+                >
+                  New
+                </button>
+                <button
+                  onClick={() => dispatch({ type: "OPEN_LOAD_MODAL" })}
+                  className="px-3 py-1.5 border border-gray-300 rounded text-sm hover:bg-gray-100 transition-colors"
+                >
+                  Load JSON
+                </button>
+                <button
+                  onClick={handleSave}
+                  className="px-3 py-1.5 bg-green-600 text-white rounded text-sm hover:bg-green-700 transition-colors"
+                >
+                  Save / Download JSON
+                </button>
+              </div>
+
+              {/* track_length */}
+              <div className="flex items-center gap-1.5 ml-1">
+                <label className="text-sm text-gray-600 whitespace-nowrap">track_length</label>
+                <input
+                  type="number"
+                  value={trackLength}
+                  onChange={e => dispatch({ type: "SET_TRACK_LENGTH", value: e.target.value })}
+                  className="border border-gray-300 rounded px-2 py-1 text-sm w-28 focus:outline-none focus:ring-1 focus:ring-blue-400"
+                  placeholder="e.g. 5793"
+                />
+                <span className="text-xs text-gray-400">m</span>
+              </div>
+
+              {/* auto-adjust */}
+              <label className="flex items-center gap-1.5 text-sm text-gray-600 cursor-pointer ml-auto select-none">
+                <input
+                  type="checkbox"
+                  checked={autoAdjust}
+                  onChange={() => dispatch({ type: "TOGGLE_AUTO_ADJUST" })}
+                  className="rounded"
+                />
+                Auto-adjust
+                <span className="text-xs text-gray-400">(end_m → next start_m)</span>
+              </label>
+            </div>
+
+            {/* Global error banner */}
+            {totalErrorCount > 0 && (
+              <div className="bg-red-50 border-t border-red-200 px-4 py-1.5 text-sm text-red-700 font-medium text-center">
+                {totalErrorCount} segment{totalErrorCount > 1 ? "s" : ""} with errors
+              </div>
+            )}
+          </header>
+
+          {/* ── Segment list ── */}
+          <main className="max-w-3xl mx-auto px-4 py-6">
+            {segments.length === 0 ? (
+              <div className="text-center py-20 text-gray-400">
+                <p className="text-2xl mb-2">No segments</p>
+                <p className="text-sm mb-6">Load a JSON file or create a new segment to get started.</p>
+                <button
+                  onClick={() => dispatch({ type: "ADD_FIRST" })}
+                  className="px-5 py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm"
+                >
+                  + Add First Segment
+                </button>
+              </div>
+            ) : (
+              <>
+                {/* Segment index header */}
+                <div className="flex justify-between items-center mb-4">
+                  <p className="text-sm text-gray-500">
+                    {segments.length} segment{segments.length > 1 ? "s" : ""}
+                    {totalErrorCount === 0 && (
+                      <span className="ml-2 text-green-600 font-medium">✓ All valid</span>
+                    )}
+                  </p>
+                </div>
+
+                {segments.map((seg, i) => (
+                  <SegmentCard
+                    key={seg._id}
+                    seg={seg}
+                    index={i}
+                    total={segments.length}
+                    errors={errors}
+                    dispatch={dispatch}
+                  />
+                ))}
+
+                {/* Add at end */}
+                <button
+                  onClick={() => dispatch({ type: "ADD_LAST" })}
+                  className="w-full mt-2 py-3 border-2 border-dashed border-gray-300 rounded-lg text-gray-500 hover:border-blue-400 hover:text-blue-500 hover:bg-blue-50 transition-colors text-sm"
+                >
+                  + Add Segment at End
+                </button>
+              </>
+            )}
+          </main>
+
+          {/* Load modal */}
+          {loadModalOpen && <LoadModal dispatch={dispatch} />}
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById("root"));
+    root.render(<App />);
+  </script>
+</body>
+</html>
