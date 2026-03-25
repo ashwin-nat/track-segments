@@ -38,7 +38,7 @@
     let _counter = 0;
     function makeId() { return `seg_${++_counter}_${Math.random().toString(36).slice(2,7)}`; }
 
-    function makeSegment(prevEndM = 0, type = "straight") {
+    function makeSegment(prevEndM = 0, type = "corner") {
       return {
         _id: makeId(),
         type,
@@ -60,7 +60,7 @@
       const errors = {};
       segments.forEach((seg, i) => {
         const e = {};
-        if ((seg.type === "straight" || seg.type === "complex_corner") && !seg.name.trim()) {
+        if (seg.type === "straight" && !seg.name.trim()) {
           e.name = "Required";
         }
         if (seg.start_m === "" || isNaN(Number(seg.start_m))) e.start_m = "Required";
@@ -97,7 +97,7 @@
         out.corner_number = Number(seg.corner_number);
       }
       if (seg.type === "complex_corner") {
-        out.name = seg.name.trim();
+        if (seg.name.trim()) out.name = seg.name.trim();
         out.corner_numbers = parseCornerNumbers(seg.corner_numbers_raw);
       }
       return out;
@@ -132,7 +132,7 @@
     const STORAGE_KEY = "track-segment-editor.state.v1";
 
     function normalizePersistedSegment(seg) {
-      const type = ["straight", "corner", "complex_corner"].includes(seg?.type) ? seg.type : "straight";
+      const type = ["straight", "corner", "complex_corner"].includes(seg?.type) ? seg.type : "corner";
       return {
         _id: typeof seg?._id === "string" && seg._id ? seg._id : makeId(),
         type,
@@ -316,14 +316,14 @@
     function TypeSpecificFields({ seg, errors, dispatch }) {
       if (seg.type === "corner") {
         return (
-          <div className="mt-3">
-            <label className="block text-xs font-medium text-zinc-400 mb-0.5">
+          <div className="mt-1.5">
+            <label className="block text-xs font-medium text-zinc-500 mb-0.5">
               corner_number <span className="text-red-500">*</span>
             </label>
             <input
               type="number"
               value={seg.corner_number}
-              className={inputCls(!!errors.corner_number) + " w-32"}
+              className={inputCls(!!errors.corner_number) + " w-28"}
               onChange={e => dispatch({ type: "UPDATE_SEGMENT", id: seg._id, field: "corner_number", value: e.target.value })}
             />
             <FieldError msg={errors.corner_number} />
@@ -333,14 +333,11 @@
 
       if (seg.type === "complex_corner") {
         const nums = parseCornerNumbers(seg.corner_numbers_raw);
-        const preview = seg.name.trim() && nums.length > 0
-          ? `${seg.name.trim()} (T${nums[0]}–T${nums[nums.length-1]})`
-          : null;
         return (
-          <div className="mt-3">
-            <label className="block text-xs font-medium text-zinc-400 mb-0.5">
+          <div className="mt-1.5">
+            <label className="block text-xs font-medium text-zinc-500 mb-0.5">
               corner_numbers <span className="text-red-500">*</span>{" "}
-              <span className="font-normal text-zinc-500">(comma-separated integers, e.g. 5,6,7)</span>
+              <span className="font-normal text-zinc-600">(comma-separated, e.g. 5,6,7)</span>
             </label>
             <input
               type="text"
@@ -351,7 +348,7 @@
             />
             <FieldError msg={errors.corner_numbers} />
             {nums.length > 0 && !errors.corner_numbers && (
-              <div className="flex flex-wrap gap-1 mt-1.5">
+              <div className="flex flex-wrap gap-1 mt-1">
                 {nums.map((n, i) => (
                   <span key={i} className="bg-red-950 text-red-300 text-xs px-2 py-0.5 rounded-full border border-red-800">
                     T{n}
@@ -359,7 +356,6 @@
                 ))}
               </div>
             )}
-            {preview && <p className="text-xs text-zinc-500 italic mt-1">{preview}</p>}
           </div>
         );
       }
@@ -373,9 +369,9 @@
       const isMoving = animTick > 0;
 
       return (
-        <div ref={cardRef} className="flex items-start gap-2 mb-3">
+        <div ref={cardRef} className="flex items-start gap-2 mb-1.5">
           {/* Segment number */}
-          <div className="flex-shrink-0 w-8 pt-4 text-right">
+          <div className="flex-shrink-0 w-7 pt-2 text-right">
             <span className="text-zinc-600 text-xs font-mono font-bold">{String(segNum).padStart(2, "0")}</span>
           </div>
 
@@ -386,52 +382,62 @@
             }`}
             style={{ backgroundColor: "#1a1a1a" }}
           >
-            {/* Flash overlay — keyed by animTick so it remounts (restarts) on every move */}
             {isMoving && (
               <div key={animTick} className="seg-flash-overlay absolute inset-0 pointer-events-none z-10 rounded-lg" />
             )}
-            <div className="p-4">
-              {/* Top row: type + name + error badge + delete */}
-              <div className="flex gap-2 items-start mb-3">
-                <div className="flex-shrink-0">
-                  <label className="block text-xs font-medium text-zinc-400 mb-0.5">Type</label>
-                  <select
-                    value={seg.type}
-                    className="border border-zinc-600 rounded px-2 py-1 text-sm bg-zinc-800 text-white focus:outline-none focus:ring-1 focus:ring-red-500"
-                    onChange={e => dispatch({ type: "CHANGE_TYPE", id: seg._id, newType: e.target.value })}
-                  >
-                    <option value="straight">straight</option>
-                    <option value="corner">corner</option>
-                    <option value="complex_corner">complex_corner</option>
-                  </select>
-                </div>
+            <div className="px-3 py-2">
+              {/* Grid: row 1 = labels, row 2 = inputs — guarantees perfect alignment */}
+              <div className="grid gap-x-2 gap-y-0.5 items-center" style={{ gridTemplateColumns: "auto 1fr 6rem 6rem auto" }}>
+                {/* Labels row */}
+                <label className="text-xs font-medium text-zinc-500">Type</label>
+                <label className="text-xs font-medium text-zinc-500">
+                  Name{" "}
+                  {seg.type === "straight"
+                    ? <span className="text-red-500">*</span>
+                    : <span className="font-normal text-zinc-600">(opt)</span>
+                  }
+                </label>
+                <label className="text-xs font-medium text-zinc-500">start_m <span className="text-red-500">*</span></label>
+                <label className="text-xs font-medium text-zinc-500">end_m <span className="text-red-500">*</span></label>
+                <div />
 
-                <div className="flex-1">
-                  <label className="block text-xs font-medium text-zinc-400 mb-0.5">
-                    Name{" "}
-                    {seg.type === "corner"
-                      ? <span className="font-normal text-zinc-500">(optional)</span>
-                      : <span className="text-red-500">*</span>
-                    }
-                  </label>
-                  <input
-                    type="text"
-                    value={seg.name}
-                    className={inputCls(!!e.name)}
-                    onChange={ev => dispatch({ type: "UPDATE_SEGMENT", id: seg._id, field: "name", value: ev.target.value })}
-                  />
-                  <FieldError msg={e.name} />
-                </div>
-
-                <div className="flex-shrink-0 flex items-center gap-1 pt-5">
+                {/* Inputs row */}
+                <select
+                  value={seg.type}
+                  className="border border-zinc-600 rounded px-2 py-1 text-sm bg-zinc-800 text-white focus:outline-none focus:ring-1 focus:ring-red-500"
+                  onChange={e => dispatch({ type: "CHANGE_TYPE", id: seg._id, newType: e.target.value })}
+                >
+                  <option value="straight">straight</option>
+                  <option value="corner">corner</option>
+                  <option value="complex_corner">complex_corner</option>
+                </select>
+                <input
+                  type="text"
+                  value={seg.name}
+                  className={inputCls(!!e.name)}
+                  onChange={ev => dispatch({ type: "UPDATE_SEGMENT", id: seg._id, field: "name", value: ev.target.value })}
+                />
+                <input
+                  type="number"
+                  value={seg.start_m}
+                  className={inputCls(!!e.start_m)}
+                  onChange={ev => dispatch({ type: "UPDATE_SEGMENT", id: seg._id, field: "start_m", value: ev.target.value })}
+                />
+                <input
+                  type="number"
+                  value={seg.end_m}
+                  className={inputCls(!!e.end_m)}
+                  onChange={ev => dispatch({ type: "UPDATE_SEGMENT", id: seg._id, field: "end_m", value: ev.target.value })}
+                />
+                <div className="flex items-center gap-1">
                   {hasError && (
                     <span className="text-xs bg-red-950 text-red-400 px-1.5 py-0.5 rounded-full font-medium border border-red-800">
-                      {Object.keys(e).length} err{Object.keys(e).length > 1 ? "s" : ""}
+                      {Object.keys(e).length}!
                     </span>
                   )}
                   <button
                     onClick={() => dispatch({ type: "DELETE", id: seg._id })}
-                    className="text-zinc-500 hover:text-red-500 transition-colors text-xl leading-none font-bold ml-1"
+                    className="text-zinc-500 hover:text-red-500 transition-colors text-xl leading-none font-bold"
                     title="Delete segment"
                   >
                     ×
@@ -439,46 +445,27 @@
                 </div>
               </div>
 
-              {/* Range fields */}
-              <div className="grid grid-cols-2 gap-3 mb-1">
-                <div>
-                  <label className="block text-xs font-medium text-zinc-400 mb-0.5">
-                    start_m <span className="text-red-500">*</span>
-                  </label>
-                  <input
-                    type="number"
-                    value={seg.start_m}
-                    className={inputCls(!!e.start_m)}
-                    onChange={ev => dispatch({ type: "UPDATE_SEGMENT", id: seg._id, field: "start_m", value: ev.target.value })}
-                  />
-                  <FieldError msg={e.start_m} />
+              {/* Inline field errors */}
+              {(e.name || e.start_m || e.end_m) && (
+                <div className="flex flex-wrap gap-x-4 mt-0.5">
+                  {e.name    && <FieldError msg={`name: ${e.name}`} />}
+                  {e.start_m && <FieldError msg={`start: ${e.start_m}`} />}
+                  {e.end_m   && <FieldError msg={`end: ${e.end_m}`} />}
                 </div>
-                <div>
-                  <label className="block text-xs font-medium text-zinc-400 mb-0.5">
-                    end_m <span className="text-red-500">*</span>
-                  </label>
-                  <input
-                    type="number"
-                    value={seg.end_m}
-                    className={inputCls(!!e.end_m)}
-                    onChange={ev => dispatch({ type: "UPDATE_SEGMENT", id: seg._id, field: "end_m", value: ev.target.value })}
-                  />
-                  <FieldError msg={e.end_m} />
-                </div>
-              </div>
+              )}
 
               <TypeSpecificFields seg={seg} errors={e} dispatch={dispatch} />
             </div>
 
             {/* Card footer */}
             <div
-              className="border-t px-4 py-2 flex gap-1.5 flex-wrap text-xs"
+              className="border-t px-3 py-1 flex gap-1 flex-wrap text-xs"
               style={{ borderColor: "#2a2a2a", backgroundColor: "#141414" }}
             >
               <button
                 onClick={() => dispatch({ type: "MOVE_UP", id: seg._id })}
                 disabled={index === 0}
-                className="px-2.5 py-1 border border-zinc-700 rounded text-zinc-400 hover:border-red-600 hover:text-red-400 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                className="px-2 py-0.5 border border-zinc-700 rounded text-zinc-400 hover:border-red-600 hover:text-red-400 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
                 title="Move up"
               >
                 ↑ Up
@@ -486,7 +473,7 @@
               <button
                 onClick={() => dispatch({ type: "MOVE_DOWN", id: seg._id })}
                 disabled={index === total - 1}
-                className="px-2.5 py-1 border border-zinc-700 rounded text-zinc-400 hover:border-red-600 hover:text-red-400 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                className="px-2 py-0.5 border border-zinc-700 rounded text-zinc-400 hover:border-red-600 hover:text-red-400 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
                 title="Move down"
               >
                 ↓ Down
@@ -494,14 +481,14 @@
               <span className="border-l border-zinc-700 mx-0.5" />
               <button
                 onClick={() => dispatch({ type: "INSERT_ABOVE", id: seg._id })}
-                className="px-2.5 py-1 border border-zinc-700 text-zinc-400 rounded hover:border-red-600 hover:text-red-400 transition-colors"
+                className="px-2 py-0.5 border border-zinc-700 text-zinc-400 rounded hover:border-red-600 hover:text-red-400 transition-colors"
                 title="Insert above"
               >
                 + Above
               </button>
               <button
                 onClick={() => dispatch({ type: "INSERT_BELOW", id: seg._id })}
-                className="px-2.5 py-1 border border-zinc-700 text-zinc-400 rounded hover:border-red-600 hover:text-red-400 transition-colors"
+                className="px-2 py-0.5 border border-zinc-700 text-zinc-400 rounded hover:border-red-600 hover:text-red-400 transition-colors"
                 title="Insert below"
               >
                 + Below
@@ -649,6 +636,21 @@
         if (node) node.scrollIntoView({ behavior: "smooth", block: "center" });
       };
 
+      const handleCopyJSON = () => {
+        if (!circuitName.trim() || circuitNumber === "") {
+          alert("circuit_name and circuit_number are required.");
+          return;
+        }
+        const payload = {
+          circuit_name: circuitName.trim(),
+          circuit_number: Number(circuitNumber),
+          segments: segments.map(exportSegment),
+        };
+        navigator.clipboard.writeText(JSON.stringify(payload, null, 2))
+          .then(() => alert("JSON copied to clipboard!"))
+          .catch(() => alert("Failed to copy to clipboard."));
+      };
+
       const handleNew = () => {
         if (segments.length > 0 && !confirm("Start fresh? Unsaved changes will be lost.")) return;
         dispatch({ type: "NEW" });
@@ -709,6 +711,12 @@
                     className="px-3 py-1.5 border border-zinc-700 rounded text-sm text-zinc-300 hover:border-zinc-400 hover:text-white transition-colors"
                   >
                     Load JSON
+                  </button>
+                  <button
+                    onClick={handleCopyJSON}
+                    className="px-3 py-1.5 border border-zinc-700 rounded text-sm text-zinc-300 hover:border-zinc-400 hover:text-white transition-colors"
+                  >
+                    Copy JSON
                   </button>
                   <button
                     onClick={handleSave}
