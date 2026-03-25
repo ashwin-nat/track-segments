@@ -8,6 +8,7 @@
   <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" />
   <style>
     @keyframes segbounce {
       0%   { transform: scale(1.04);  box-shadow: 0 0 0 2px #ef4444, 0 0 40px rgba(239,68,68,0.7); }
@@ -24,6 +25,13 @@
     .seg-flash-overlay {
       background: linear-gradient(135deg, rgba(220,38,38,0.4) 0%, rgba(220,38,38,0.18) 100%);
       animation: segflash 0.75s ease-out forwards;
+    }
+    @keyframes headerSlideDown {
+      from { opacity: 0; transform: translateY(-6px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    .header-fields-enter {
+      animation: headerSlideDown 0.18s ease-out forwards;
     }
   </style>
 </head>
@@ -407,7 +415,7 @@
             <input
               type="number"
               value={seg.corner_number}
-              className={inputCls(!!errors.corner_number) + " w-28"}
+              className={`border rounded px-2 py-1 text-sm bg-zinc-800 text-white w-20 focus:outline-none focus:ring-1 ${errors.corner_number ? "border-red-500 focus:ring-red-500" : "border-zinc-600 focus:ring-red-500"}`}
               onChange={e => dispatch({ type: "UPDATE_SEGMENT", id: seg._id, field: "corner_number", value: e.target.value })}
             />
             <FieldError msg={errors.corner_number} />
@@ -431,15 +439,6 @@
               onChange={e => dispatch({ type: "UPDATE_SEGMENT", id: seg._id, field: "corner_numbers_raw", value: e.target.value })}
             />
             <FieldError msg={errors.corner_numbers} />
-            {nums.length > 0 && !errors.corner_numbers && (
-              <div className="flex flex-wrap gap-1 mt-1">
-                {nums.map((n, i) => (
-                  <span key={i} className="bg-red-950 text-red-300 text-xs px-2 py-0.5 rounded-full border border-red-800">
-                    T{n}
-                  </span>
-                ))}
-              </div>
-            )}
           </div>
         );
       }
@@ -519,19 +518,12 @@
                   className={inputCls(!!e.end_m)}
                   onChange={ev => dispatch({ type: "UPDATE_SEGMENT", id: seg._id, field: "end_m", value: ev.target.value })}
                 />
-                <div className="flex items-center gap-1">
+                <div className="flex items-center">
                   {hasError && (
                     <span className="text-xs bg-red-950 text-red-400 px-1.5 py-0.5 rounded-full font-medium border border-red-800">
                       {Object.keys(e).length}!
                     </span>
                   )}
-                  <button
-                    onClick={() => dispatch({ type: "DELETE", id: seg._id })}
-                    className="text-zinc-500 hover:text-red-500 transition-colors text-xl leading-none font-bold"
-                    title="Delete segment"
-                  >
-                    ×
-                  </button>
                 </div>
               </div>
 
@@ -595,6 +587,14 @@
                 title="Insert below"
               >
                 + Below
+              </button>
+              <span className="border-l border-zinc-700 mx-0.5" />
+              <button
+                onClick={() => dispatch({ type: "DELETE", id: seg._id })}
+                className="px-2 py-0.5 border border-zinc-700 text-zinc-500 rounded hover:border-red-600 hover:text-red-500 transition-colors"
+                title="Delete segment"
+              >
+                <i className="bi bi-trash" />
               </button>
             </div>
           </div>
@@ -685,14 +685,97 @@
       );
     }
 
+    // ─── App-level Modal & Toast ─────────────────────────────────────────────────
+
+    function AppModal({ state }) {
+      const [inputVal, setInputVal] = useState(state?.defaultValue ?? "");
+      useEffect(() => { setInputVal(state?.defaultValue ?? ""); }, [state?.id]);
+      if (!state) return null;
+      const isPrompt = state.type === "prompt";
+      const isConfirm = state.type === "confirm";
+      return (
+        <div className="fixed inset-0 bg-black/75 flex items-center justify-center z-50"
+          onClick={isPrompt || isConfirm ? state.onCancel : state.onConfirm}>
+          <div className="rounded-xl shadow-2xl p-6 w-full max-w-sm mx-4 border border-zinc-700"
+            style={{ backgroundColor: "#1a1a1a" }} onClick={e => e.stopPropagation()}>
+            {state.title && <h2 className="text-base font-semibold mb-2 text-white">{state.title}</h2>}
+            <p className="text-sm text-zinc-300 mb-4 whitespace-pre-wrap">{state.message}</p>
+            {isPrompt && (
+              <input
+                type="text"
+                autoFocus
+                value={inputVal}
+                onChange={e => setInputVal(e.target.value)}
+                onKeyDown={e => e.key === "Enter" && state.onConfirm(inputVal)}
+                className="w-full border border-zinc-600 rounded px-3 py-1.5 text-sm bg-zinc-900 text-white focus:outline-none focus:ring-1 focus:ring-red-500 mb-4"
+              />
+            )}
+            <div className="flex justify-end gap-2">
+              {(isConfirm || isPrompt) && (
+                <button onClick={state.onCancel}
+                  className="px-4 py-1.5 border border-zinc-600 rounded text-sm text-zinc-300 hover:border-zinc-400 transition-colors">
+                  Cancel
+                </button>
+              )}
+              <button
+                onClick={() => isPrompt ? state.onConfirm(inputVal) : state.onConfirm()}
+                className="px-4 py-1.5 bg-red-600 text-white rounded text-sm hover:bg-red-700 transition-colors font-medium">
+                OK
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function Toast({ id, message, variant, onDone }) {
+      useEffect(() => {
+        const t = setTimeout(onDone, 2500);
+        return () => clearTimeout(t);
+      }, [id]);
+      const cls = variant === "error"
+        ? "bg-red-950 border-red-800 text-red-300"
+        : "bg-zinc-800 border-zinc-600 text-white";
+      return (
+        <div className={`fixed bottom-5 right-5 z-50 text-sm px-4 py-2.5 rounded-lg shadow-2xl border ${cls}`}>
+          {message}
+        </div>
+      );
+    }
+
     function App() {
       const [state, dispatch] = useReducer(reducer, undefined, loadInitialState);
       const { circuitName, circuitNumber, trackLength, segments, autoAdjust, errors, loadModalOpen, loadedFileName, needsTrackLength } = state;
       // ids: Set of segment _ids to flash; tick increments on every move to restart animation even for same segment
       const [moveAnim, setMoveAnim] = useState({ ids: new Set(), tick: 0 });
       const [offset, setOffset] = useState(0);
+      const [headerCollapsed, setHeaderCollapsed] = useState(false);
       const segmentRefs = useRef({});
       const lastErrorIdRef = useRef(null);
+      const modalIdRef = useRef(0);
+      const [modalState, setModalState] = useState(null);
+      const [toast, setToast] = useState(null);
+
+      const showAlert = (message, title) => new Promise(resolve => {
+        setModalState({ id: ++modalIdRef.current, type: "alert", title, message,
+          onConfirm: () => { setModalState(null); resolve(); }
+        });
+      });
+      const showConfirm = (message) => new Promise(resolve => {
+        setModalState({ id: ++modalIdRef.current, type: "confirm", message,
+          onConfirm: () => { setModalState(null); resolve(true); },
+          onCancel: () => { setModalState(null); resolve(false); }
+        });
+      });
+      const showPrompt = (message, defaultValue = "") => new Promise(resolve => {
+        setModalState({ id: ++modalIdRef.current, type: "prompt", message, defaultValue,
+          onConfirm: (val) => { setModalState(null); resolve(val); },
+          onCancel: () => { setModalState(null); resolve(null); }
+        });
+      });
+      const showToast = (message, variant = "success") => {
+        setToast({ id: ++modalIdRef.current, message, variant });
+      };
 
       const totalErrorCount = Object.keys(errors).length;
       const errorSegmentIds = segments
@@ -711,13 +794,12 @@
       useEffect(() => {
         if (!needsTrackLength) return;
         dispatch({ type: "CLEAR_NEEDS_TRACK_LENGTH" });
-        const val = prompt("This track does not have a track length defined. Please enter the total track length in meters.");
-        if (val !== null) {
-          const num = Number(val);
-          if (num > 0) {
-            dispatch({ type: "SET_TRACK_LENGTH", value: String(num) });
+        showPrompt("This track does not have a track length defined.\nPlease enter the total track length in meters.").then(val => {
+          if (val !== null) {
+            const num = Number(val);
+            if (num > 0) dispatch({ type: "SET_TRACK_LENGTH", value: String(num) });
           }
-        }
+        });
       }, [needsTrackLength]);
 
       useEffect(() => {
@@ -755,13 +837,13 @@
       const trackLengthNum = Number(trackLength);
       const trackLengthValid = trackLength !== "" && !isNaN(trackLengthNum) && trackLengthNum > 0;
 
-      const handleCopyJSON = () => {
+      const handleCopyJSON = async () => {
         if (!circuitName.trim() || circuitNumber === "") {
-          alert("circuit_name and circuit_number are required.");
+          await showAlert("circuit_name and circuit_number are required.");
           return;
         }
         if (!trackLengthValid) {
-          alert("A valid track length (> 0) is required before copying JSON.");
+          await showAlert("A valid track length (> 0) is required before copying JSON.");
           return;
         }
         const payload = {
@@ -770,30 +852,33 @@
           track_length: trackLengthNum,
           segments: segments.map(exportSegment),
         };
-        navigator.clipboard.writeText(JSON.stringify(payload, null, 2))
-          .then(() => alert("JSON copied to clipboard!"))
-          .catch(() => alert("Failed to copy to clipboard."));
+        try {
+          await navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
+          showToast("JSON copied to clipboard!");
+        } catch {
+          showToast("Failed to copy to clipboard.", "error");
+        }
       };
 
-      const handleNew = () => {
-        if (segments.length > 0 && !confirm("Start fresh? Unsaved changes will be lost.")) return;
+      const handleNew = async () => {
+        if (segments.length > 0 && !await showConfirm("Start fresh? Unsaved changes will be lost.")) return;
         dispatch({ type: "NEW" });
       };
 
-      const handleGenerateReverse = () => {
+      const handleGenerateReverse = async () => {
         if (!trackLengthValid) {
-          alert("Track length must be defined before generating a reverse track.");
+          await showAlert("Track length must be defined before generating a reverse track.");
           return;
         }
-        if (!confirm("This will create a new track with reversed segment positions and order. Continue?")) return;
+        if (!await showConfirm("This will create a new track with reversed segment positions and order. Continue?")) return;
 
-        const newName = prompt("Enter circuit_name for the reversed track:");
+        const newName = await showPrompt("Enter circuit_name for the reversed track:");
         if (newName === null || !newName.trim()) return;
 
-        const newNumberStr = prompt("Enter circuit_number for the reversed track:");
+        const newNumberStr = await showPrompt("Enter circuit_number for the reversed track:");
         if (newNumberStr === null) return;
         const newNumber = Number(newNumberStr);
-        if (isNaN(newNumber)) { alert("Invalid circuit_number."); return; }
+        if (isNaN(newNumber)) { await showAlert("Invalid circuit_number."); return; }
 
         const trackData = {
           circuit_name: circuitName,
@@ -806,25 +891,25 @@
         try {
           reversed = generateReverseTrack(trackData, newName.trim(), newNumber);
         } catch (err) {
-          alert("Cannot generate reverse track: " + err.message);
+          await showAlert("Cannot generate reverse track: " + err.message);
           return;
         }
 
-        alert("Segment names may not be semantically correct in reverse direction. Please review.");
+        await showAlert("Segment names may not be semantically correct in reverse direction. Please review.");
         dispatch({ type: "LOAD_JSON", data: reversed, fileName: "" });
       };
 
-      const handleSave = () => {
+      const handleSave = async () => {
         if (!circuitName.trim() || circuitNumber === "") {
-          alert("circuit_name and circuit_number are required before saving.");
+          await showAlert("circuit_name and circuit_number are required before saving.");
           return;
         }
         if (!trackLengthValid) {
-          alert("A valid track length (> 0) is required before saving.");
+          await showAlert("A valid track length (> 0) is required before saving.");
           return;
         }
         if (totalErrorCount > 0) {
-          if (!confirm(`There are ${totalErrorCount} segment(s) with validation errors. Export anyway?`)) return;
+          if (!await showConfirm(`There are ${totalErrorCount} segment(s) with validation errors. Export anyway?`)) return;
         }
         const payload = {
           circuit_name: circuitName.trim(),
@@ -833,7 +918,7 @@
           segments: segments.map(exportSegment),
         };
         const defaultName = loadedFileName || `${circuitName.trim().replace(/\s+/g, "_")}.json`;
-        const chosenName = prompt("Save as:", defaultName);
+        const chosenName = await showPrompt("Save as:", defaultName);
         if (!chosenName) return;
         const finalName = chosenName.endsWith(".json") ? chosenName : chosenName + ".json";
         const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
@@ -847,10 +932,10 @@
         URL.revokeObjectURL(url);
       };
 
-      const handleApplyOffset = () => {
-        if (!trackLengthValid) { alert("Track length must be defined to apply offset."); return; }
+      const handleApplyOffset = async () => {
+        if (!trackLengthValid) { await showAlert("Track length must be defined to apply offset."); return; }
         if (offset === 0) return;
-        if (!confirm(`Apply offset of ${offset}m to all segments? This will modify all start_m / end_m values and cannot be undone.`)) return;
+        if (!await showConfirm(`Apply offset of ${offset}m to all segments? This will modify all start_m / end_m values and cannot be undone.`)) return;
         dispatch({ type: "APPLY_OFFSET", offset, trackLen: trackLengthNum });
         setOffset(0);
       };
@@ -862,15 +947,25 @@
             className="sticky top-0 z-20 border-b border-zinc-800 shadow-lg"
             style={{ backgroundColor: "#0d0d0d", borderTop: "3px solid #dc2626" }}
           >
-            <div className="max-w-3xl mx-auto px-4 py-3">
+            <div className="max-w-3xl mx-auto px-4 py-2">
+
               {/* Title + actions row */}
-              <div className="flex flex-wrap items-center gap-3 mb-3">
-                <div className="mr-1">
-                  <h1 className="font-bold text-white text-base leading-tight">Track Segment Editor</h1>
-                  <p className="text-xs text-red-500 font-semibold tracking-widest uppercase">Pits n' Giggles</p>
+              <div className="flex flex-wrap items-center gap-3 mb-2">
+                <div className="flex items-center gap-1.5 mr-1">
+                  <div>
+                    <h1 className="font-bold text-white text-base leading-tight">Track Segment Editor</h1>
+                    <p className="text-xs text-red-500 font-semibold tracking-widest uppercase">Pits n' Giggles</p>
+                  </div>
+                  <button
+                    onClick={() => setHeaderCollapsed(c => !c)}
+                    className="self-start mt-0.5 text-zinc-600 hover:text-zinc-300 transition-colors border border-zinc-700 rounded-full w-5 h-5 flex items-center justify-center"
+                    title={headerCollapsed ? "Expand header" : "Collapse header"}
+                  >
+                    <i className={`bi ${headerCollapsed ? "bi-chevron-down" : "bi-chevron-up"} text-xs`} />
+                  </button>
                 </div>
 
-                <div className="flex gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <button
                     onClick={handleNew}
                     className="px-3 py-1.5 border border-zinc-700 rounded text-sm text-zinc-300 hover:border-zinc-400 hover:text-white transition-colors"
@@ -899,111 +994,114 @@
                     onClick={handleSave}
                     className="px-3 py-1.5 bg-red-600 text-white rounded text-sm hover:bg-red-700 transition-colors font-semibold"
                   >
-                    Save / Download JSON
+                    Download JSON
                   </button>
-                </div>
-
-                <label className="flex items-center gap-1.5 text-sm text-zinc-400 cursor-pointer ml-auto select-none">
-                  <input
-                    type="checkbox"
-                    checked={autoAdjust}
-                    onChange={() => dispatch({ type: "TOGGLE_AUTO_ADJUST" })}
-                    className="accent-red-600"
-                  />
-                  Auto-adjust
-                  <span className="text-xs text-zinc-600">(end_m → next start_m)</span>
-                </label>
-              </div>
-
-              {/* Circuit fields row */}
-              <div className="flex flex-wrap gap-5">
-                <div className="flex items-center gap-2">
-                  <label className="text-sm text-zinc-400 whitespace-nowrap">
-                    circuit_name <span className="text-red-500">*</span>
-                  </label>
-                  <input
-                    type="text"
-                    value={circuitName}
-                    onChange={e => dispatch({ type: "SET_CIRCUIT_NAME", value: e.target.value })}
-                    className="border border-zinc-600 rounded px-2 py-1 text-sm bg-zinc-800 text-white w-44 focus:outline-none focus:ring-1 focus:ring-red-500 placeholder-zinc-600"
-                    placeholder="e.g. Monza"
-                  />
-                </div>
-                <div className="flex items-center gap-2">
-                  <label className="text-sm text-zinc-400 whitespace-nowrap">
-                    circuit_number <span className="text-red-500">*</span>
-                  </label>
-                  <input
-                    type="number"
-                    value={circuitNumber}
-                    onChange={e => dispatch({ type: "SET_CIRCUIT_NUMBER", value: e.target.value })}
-                    className="border border-zinc-600 rounded px-2 py-1 text-sm bg-zinc-800 text-white w-24 focus:outline-none focus:ring-1 focus:ring-red-500 placeholder-zinc-600"
-                    placeholder="e.g. 1"
-                  />
-                </div>
-                <div className="flex items-center gap-2">
-                  <label className="text-sm text-zinc-400 whitespace-nowrap">
-                    Track Length (m) <span className="text-red-500">*</span>
-                  </label>
-                  <div>
+                  <label className="flex items-center gap-1.5 text-sm text-zinc-400 cursor-pointer select-none ml-1">
                     <input
-                      type="number"
-                      value={trackLength}
-                      onChange={e => dispatch({ type: "SET_TRACK_LENGTH", value: e.target.value })}
-                      className={`border rounded px-2 py-1 text-sm bg-zinc-800 text-white w-28 focus:outline-none focus:ring-1 focus:ring-red-500 placeholder-zinc-600 ${!trackLengthValid && trackLength !== "" ? "border-red-500" : "border-zinc-600"}`}
-                      placeholder="e.g. 5793"
-                      min="0"
-                      step="any"
+                      type="checkbox"
+                      checked={autoAdjust}
+                      onChange={() => dispatch({ type: "TOGGLE_AUTO_ADJUST" })}
+                      className="accent-red-600"
                     />
-                    {!trackLengthValid && trackLength !== "" && (
-                      <p className="text-xs text-red-400 mt-0.5">Must be &gt; 0</p>
-                    )}
-                  </div>
+                    Auto-adjust
+                    <span className="text-xs text-zinc-600">(end_m → next start_m)</span>
+                  </label>
                 </div>
               </div>
 
-              {/* Offset control */}
-              {segments.length > 0 && (
-                <div className="flex flex-wrap items-center gap-2 mt-3 pt-2 border-t border-zinc-800">
-                  <span className="text-sm text-zinc-400 whitespace-nowrap">Offset (m)</span>
-                  <div className="flex items-center gap-1">
-                    {[-50, -10].map(d => (
-                      <button key={d}
-                        onClick={() => setOffset(o => o + d)}
-                        className="px-2 py-1 border border-zinc-700 rounded text-xs text-zinc-400 hover:border-amber-600 hover:text-amber-400 transition-colors font-mono"
-                      >{d}</button>
-                    ))}
-                    <input
-                      type="number"
-                      value={offset}
-                      step="any"
-                      onChange={e => setOffset(Number(e.target.value))}
-                      className="border border-zinc-600 rounded px-2 py-1 text-sm bg-zinc-800 text-white w-24 focus:outline-none focus:ring-1 focus:ring-amber-500 text-center font-mono"
-                    />
-                    {[10, 50].map(d => (
-                      <button key={d}
-                        onClick={() => setOffset(o => o + d)}
-                        className="px-2 py-1 border border-zinc-700 rounded text-xs text-zinc-400 hover:border-amber-600 hover:text-amber-400 transition-colors font-mono"
-                      >+{d}</button>
-                    ))}
+              {/* Circuit fields + offset — collapsible */}
+              {!headerCollapsed && (
+                <div className="header-fields-enter">
+                  <div className="flex flex-wrap gap-3 items-start">
+                    <div className="flex items-center gap-2">
+                      <label className="text-sm text-zinc-400 whitespace-nowrap">
+                        circuit_name <span className="text-red-500">*</span>
+                      </label>
+                      <input
+                        type="text"
+                        value={circuitName}
+                        onChange={e => dispatch({ type: "SET_CIRCUIT_NAME", value: e.target.value })}
+                        className="border border-zinc-600 rounded px-2 py-1 text-sm bg-zinc-800 text-white w-40 focus:outline-none focus:ring-1 focus:ring-red-500 placeholder-zinc-600"
+                        placeholder="e.g. Monza"
+                      />
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <label className="text-sm text-zinc-400 whitespace-nowrap">
+                        circuit_number <span className="text-red-500">*</span>
+                      </label>
+                      <input
+                        type="number"
+                        value={circuitNumber}
+                        onChange={e => dispatch({ type: "SET_CIRCUIT_NUMBER", value: e.target.value })}
+                        className="border border-zinc-600 rounded px-2 py-1 text-sm bg-zinc-800 text-white w-20 focus:outline-none focus:ring-1 focus:ring-red-500 placeholder-zinc-600"
+                        placeholder="e.g. 1"
+                      />
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <label className="text-sm text-zinc-400 whitespace-nowrap">
+                        track_length (m) <span className="text-red-500">*</span>
+                      </label>
+                      <div>
+                        <input
+                          type="number"
+                          value={trackLength}
+                          onChange={e => dispatch({ type: "SET_TRACK_LENGTH", value: e.target.value })}
+                          className={`border rounded px-2 py-1 text-sm bg-zinc-800 text-white w-24 focus:outline-none focus:ring-1 focus:ring-red-500 placeholder-zinc-600 ${!trackLengthValid && trackLength !== "" ? "border-red-500" : "border-zinc-600"}`}
+                          placeholder="e.g. 5793"
+                          min="0"
+                          step="any"
+                        />
+                        {!trackLengthValid && trackLength !== "" && (
+                          <p className="text-xs text-red-400 mt-0.5">Must be &gt; 0</p>
+                        )}
+                      </div>
+                    </div>
                   </div>
-                  <button
-                    onClick={() => setOffset(0)}
-                    disabled={offset === 0}
-                    className="px-2.5 py-1 border border-zinc-700 rounded text-xs text-zinc-400 hover:border-zinc-500 hover:text-zinc-300 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-                  >
-                    Reset
-                  </button>
-                  {offset !== 0 && (
-                    <>
-                      <span className="text-xs text-amber-500 font-medium">Preview active ({offset > 0 ? "+" : ""}{offset}m)</span>
+
+                  {/* Offset control */}
+                  {segments.length > 0 && (
+                    <div className="flex flex-wrap items-center gap-2 mt-3 pt-2 border-t border-zinc-800">
+                      <span className="text-sm text-zinc-400 whitespace-nowrap">Offset (m)</span>
+                      <div className="flex items-center gap-1">
+                        {[-50, -10].map(d => (
+                          <button key={d}
+                            onClick={() => setOffset(o => o + d)}
+                            className="px-2 py-1 border border-zinc-700 rounded text-xs text-zinc-400 hover:border-amber-600 hover:text-amber-400 transition-colors font-mono"
+                          >{d}</button>
+                        ))}
+                        <input
+                          type="number"
+                          value={offset}
+                          step="any"
+                          onChange={e => setOffset(Number(e.target.value))}
+                          className="border border-zinc-600 rounded px-2 py-1 text-sm bg-zinc-800 text-white w-24 focus:outline-none focus:ring-1 focus:ring-amber-500 text-center font-mono"
+                        />
+                        {[10, 50].map(d => (
+                          <button key={d}
+                            onClick={() => setOffset(o => o + d)}
+                            className="px-2 py-1 border border-zinc-700 rounded text-xs text-zinc-400 hover:border-amber-600 hover:text-amber-400 transition-colors font-mono"
+                          >+{d}</button>
+                        ))}
+                      </div>
                       <button
-                        onClick={handleApplyOffset}
-                        className="px-2.5 py-1 border border-amber-700 rounded text-xs text-amber-400 hover:bg-amber-950 transition-colors font-medium"
+                        onClick={() => setOffset(0)}
+                        disabled={offset === 0}
+                        className="px-2.5 py-1 border border-zinc-700 rounded text-xs text-zinc-400 hover:border-zinc-500 hover:text-zinc-300 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
                       >
-                        Apply Permanently
+                        Reset
                       </button>
-                    </>
+                      {offset !== 0 && (
+                        <>
+                          <span className="text-xs text-amber-500 font-medium">Preview active ({offset > 0 ? "+" : ""}{offset}m)</span>
+                          <button
+                            onClick={handleApplyOffset}
+                            className="px-2.5 py-1 border border-amber-700 rounded text-xs text-amber-400 hover:bg-amber-950 transition-colors font-medium"
+                          >
+                            Apply Permanently
+                          </button>
+                        </>
+                      )}
+                    </div>
                   )}
                 </div>
               )}
@@ -1086,6 +1184,8 @@
           </main>
 
           {loadModalOpen && <LoadModal dispatch={dispatch} />}
+          <AppModal state={modalState} />
+          {toast && <Toast key={toast.id} id={toast.id} message={toast.message} variant={toast.variant} onDone={() => setToast(null)} />}
         </div>
       );
     }
