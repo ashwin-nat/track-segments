@@ -56,7 +56,9 @@
 
     // ─── Validation ─────────────────────────────────────────────────────────────
 
-    function validate(segments) {
+    function validate(segments, trackLength = "") {
+      const trackLen = Number(trackLength);
+      const hasValidTrackLen = trackLength !== "" && !isNaN(trackLen) && trackLen > 0;
       const errors = {};
       segments.forEach((seg, i) => {
         const e = {};
@@ -82,9 +84,62 @@
             e.start_m = `Overlaps previous segment (prev end: ${prev.end_m})`;
           }
         }
+        if (hasValidTrackLen && !e.start_m && Number(seg.start_m) < 0) {
+          e.start_m = "Must be \u2265 0";
+        }
+        if (hasValidTrackLen && !e.end_m && Number(seg.end_m) > trackLen) {
+          e.end_m = `Must be \u2264 track_length (${trackLen})`;
+        }
         if (Object.keys(e).length > 0) errors[seg._id] = e;
       });
       return errors;
+    }
+
+    // ─── Reverse Track Generation ────────────────────────────────────────────────
+
+    function generateReverseTrack(trackData, newName, newNumber) {
+      const trackLen = trackData.track_length;
+      const segs = [...trackData.segments].sort((a, b) => a.start_m - b.start_m);
+
+      for (const seg of segs) {
+        if (seg.start_m < 0 || seg.end_m > trackLen || seg.start_m >= seg.end_m) {
+          throw new Error(`Segment "${seg.name || seg.type}" (${seg.start_m}–${seg.end_m}) is out of bounds or invalid.`);
+        }
+      }
+      for (let i = 1; i < segs.length; i++) {
+        if (segs[i].start_m < segs[i - 1].end_m) {
+          throw new Error(`Segments overlap near ${segs[i - 1].end_m}m.`);
+        }
+      }
+
+      let lastTurnNumber = 0;
+      for (const seg of segs) {
+        if (seg.type === "corner") lastTurnNumber = Math.max(lastTurnNumber, seg.corner_number);
+        if (seg.type === "complex_corner") {
+          for (const n of seg.corner_numbers) lastTurnNumber = Math.max(lastTurnNumber, n);
+        }
+      }
+
+      const reversed = segs
+        .map(seg => {
+          const newSeg = { ...seg, start_m: trackLen - seg.end_m, end_m: trackLen - seg.start_m };
+          if (lastTurnNumber > 0) {
+            if (seg.type === "corner") {
+              newSeg.corner_number = lastTurnNumber + 1 - seg.corner_number;
+            } else if (seg.type === "complex_corner") {
+              newSeg.corner_numbers = seg.corner_numbers.map(n => lastTurnNumber + 1 - n).reverse();
+            }
+          }
+          return newSeg;
+        })
+        .reverse();
+
+      return {
+        circuit_name: newName,
+        circuit_number: Number(newNumber),
+        track_length: trackLen,
+        segments: reversed,
+      };
     }
 
     // ─── Export / Import ─────────────────────────────────────────────────────────
@@ -159,11 +214,13 @@
     const initialState = {
       circuitName: "",
       circuitNumber: "",
+      trackLength: "",
       segments: [],
       autoAdjust: false,
       errors: {},
       loadModalOpen: false,
       loadedFileName: "",
+      needsTrackLength: false,
     };
 
     function loadInitialState() {
@@ -179,15 +236,20 @@
 
         syncIdCounter(segments);
 
+        const trackLength = (typeof parsed.trackLength === "string" || typeof parsed.trackLength === "number")
+          ? String(parsed.trackLength)
+          : "";
+
         return {
           ...initialState,
           circuitName: typeof parsed.circuitName === "string" ? parsed.circuitName : "",
           circuitNumber: (typeof parsed.circuitNumber === "string" || typeof parsed.circuitNumber === "number")
             ? parsed.circuitNumber
             : "",
+          trackLength,
           segments,
           autoAdjust: typeof parsed.autoAdjust === "boolean" ? parsed.autoAdjust : false,
-          errors: validate(segments),
+          errors: validate(segments, trackLength),
         };
       } catch (err) {
         console.warn("Failed to restore saved editor state:", err);
@@ -214,7 +276,7 @@
               updated = updated.map((s, i) => i === idx + 1 ? { ...s, start_m: value } : s);
             }
           }
-          return { ...state, segments: updated, errors: validate(updated) };
+          return { ...state, segments: updated, errors: validate(updated, state.trackLength) };
         }
 
         case "CHANGE_TYPE": {
@@ -222,7 +284,7 @@
             _id: s._id, type: action.newType, name: s.name,
             start_m: s.start_m, end_m: s.end_m, corner_number: "", corner_numbers_raw: "",
           });
-          return { ...state, segments: updated, errors: validate(updated) };
+          return { ...state, segments: updated, errors: validate(updated, state.trackLength) };
         }
 
         case "INSERT_ABOVE": {
@@ -230,26 +292,26 @@
           if (idx === -1) return state;
           const prevEndM = idx > 0 ? (Number(segments[idx-1].end_m) || 0) : 0;
           const updated = [...segments.slice(0, idx), makeSegment(prevEndM), ...segments.slice(idx)];
-          return { ...state, segments: updated, errors: validate(updated) };
+          return { ...state, segments: updated, errors: validate(updated, state.trackLength) };
         }
 
         case "INSERT_BELOW": {
           const idx = segments.findIndex(s => s._id === action.id);
           if (idx === -1) return state;
           const updated = [...segments.slice(0, idx+1), makeSegment(Number(segments[idx].end_m)||0), ...segments.slice(idx+1)];
-          return { ...state, segments: updated, errors: validate(updated) };
+          return { ...state, segments: updated, errors: validate(updated, state.trackLength) };
         }
 
         case "ADD_FIRST": {
           const newSeg = makeSegment(0);
-          return { ...state, segments: [newSeg], errors: validate([newSeg]) };
+          return { ...state, segments: [newSeg], errors: validate([newSeg], state.trackLength) };
         }
 
         case "ADD_LAST": {
           const last = segments[segments.length - 1];
           const newSeg = makeSegment(last ? (Number(last.end_m) || 0) : 0);
           const updated = [...segments, newSeg];
-          return { ...state, segments: updated, errors: validate(updated) };
+          return { ...state, segments: updated, errors: validate(updated, state.trackLength) };
         }
 
         case "MOVE_UP": {
@@ -257,7 +319,7 @@
           if (idx <= 0) return state;
           const updated = [...segments];
           [updated[idx-1], updated[idx]] = [updated[idx], updated[idx-1]];
-          return { ...state, segments: updated, errors: validate(updated) };
+          return { ...state, segments: updated, errors: validate(updated, state.trackLength) };
         }
 
         case "MOVE_DOWN": {
@@ -265,26 +327,37 @@
           if (idx === -1 || idx >= segments.length - 1) return state;
           const updated = [...segments];
           [updated[idx], updated[idx+1]] = [updated[idx+1], updated[idx]];
-          return { ...state, segments: updated, errors: validate(updated) };
+          return { ...state, segments: updated, errors: validate(updated, state.trackLength) };
         }
 
         case "DELETE": {
           const updated = segments.filter(s => s._id !== action.id);
-          return { ...state, segments: updated, errors: validate(updated) };
+          return { ...state, segments: updated, errors: validate(updated, state.trackLength) };
         }
 
         case "LOAD_JSON": {
           const loaded = action.data.segments.map(importSegment);
+          const trackLength = action.data.track_length != null ? String(action.data.track_length) : "";
           return {
             ...state,
             circuitName: action.data.circuit_name,
             circuitNumber: action.data.circuit_number,
+            trackLength,
+            needsTrackLength: trackLength === "",
             segments: loaded,
-            errors: validate(loaded),
+            errors: validate(loaded, trackLength),
             loadModalOpen: false,
             loadedFileName: action.fileName || "",
           };
         }
+
+        case "SET_TRACK_LENGTH": {
+          const tl = action.value;
+          return { ...state, trackLength: tl, needsTrackLength: false, errors: validate(state.segments, tl) };
+        }
+
+        case "CLEAR_NEEDS_TRACK_LENGTH":
+          return { ...state, needsTrackLength: false };
 
         case "NEW":
           return { ...initialState };
@@ -584,7 +657,7 @@
 
     function App() {
       const [state, dispatch] = useReducer(reducer, undefined, loadInitialState);
-      const { circuitName, circuitNumber, segments, autoAdjust, errors, loadModalOpen, loadedFileName } = state;
+      const { circuitName, circuitNumber, trackLength, segments, autoAdjust, errors, loadModalOpen, loadedFileName, needsTrackLength } = state;
       // ids: Set of segment _ids to flash; tick increments on every move to restart animation even for same segment
       const [moveAnim, setMoveAnim] = useState({ ids: new Set(), tick: 0 });
       const segmentRefs = useRef({});
@@ -597,12 +670,24 @@
 
       useEffect(() => {
         try {
-          const snapshot = { circuitName, circuitNumber, segments, autoAdjust };
+          const snapshot = { circuitName, circuitNumber, trackLength, segments, autoAdjust };
           localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot));
         } catch (err) {
           console.warn("Failed to persist editor state:", err);
         }
-      }, [circuitName, circuitNumber, segments, autoAdjust]);
+      }, [circuitName, circuitNumber, trackLength, segments, autoAdjust]);
+
+      useEffect(() => {
+        if (!needsTrackLength) return;
+        dispatch({ type: "CLEAR_NEEDS_TRACK_LENGTH" });
+        const val = prompt("This track does not have a track length defined. Please enter the total track length in meters.");
+        if (val !== null) {
+          const num = Number(val);
+          if (num > 0) {
+            dispatch({ type: "SET_TRACK_LENGTH", value: String(num) });
+          }
+        }
+      }, [needsTrackLength]);
 
       useEffect(() => {
         const validIds = new Set(segments.map(seg => seg._id));
@@ -636,14 +721,22 @@
         if (node) node.scrollIntoView({ behavior: "smooth", block: "center" });
       };
 
+      const trackLengthNum = Number(trackLength);
+      const trackLengthValid = trackLength !== "" && !isNaN(trackLengthNum) && trackLengthNum > 0;
+
       const handleCopyJSON = () => {
         if (!circuitName.trim() || circuitNumber === "") {
           alert("circuit_name and circuit_number are required.");
           return;
         }
+        if (!trackLengthValid) {
+          alert("A valid track length (> 0) is required before copying JSON.");
+          return;
+        }
         const payload = {
           circuit_name: circuitName.trim(),
           circuit_number: Number(circuitNumber),
+          track_length: trackLengthNum,
           segments: segments.map(exportSegment),
         };
         navigator.clipboard.writeText(JSON.stringify(payload, null, 2))
@@ -656,9 +749,47 @@
         dispatch({ type: "NEW" });
       };
 
+      const handleGenerateReverse = () => {
+        if (!trackLengthValid) {
+          alert("Track length must be defined before generating a reverse track.");
+          return;
+        }
+        if (!confirm("This will create a new track with reversed segment positions and order. Continue?")) return;
+
+        const newName = prompt("Enter circuit_name for the reversed track:");
+        if (newName === null || !newName.trim()) return;
+
+        const newNumberStr = prompt("Enter circuit_number for the reversed track:");
+        if (newNumberStr === null) return;
+        const newNumber = Number(newNumberStr);
+        if (isNaN(newNumber)) { alert("Invalid circuit_number."); return; }
+
+        const trackData = {
+          circuit_name: circuitName,
+          circuit_number: Number(circuitNumber),
+          track_length: trackLengthNum,
+          segments: segments.map(exportSegment),
+        };
+
+        let reversed;
+        try {
+          reversed = generateReverseTrack(trackData, newName.trim(), newNumber);
+        } catch (err) {
+          alert("Cannot generate reverse track: " + err.message);
+          return;
+        }
+
+        alert("Segment names may not be semantically correct in reverse direction. Please review.");
+        dispatch({ type: "LOAD_JSON", data: reversed, fileName: "" });
+      };
+
       const handleSave = () => {
         if (!circuitName.trim() || circuitNumber === "") {
           alert("circuit_name and circuit_number are required before saving.");
+          return;
+        }
+        if (!trackLengthValid) {
+          alert("A valid track length (> 0) is required before saving.");
           return;
         }
         if (totalErrorCount > 0) {
@@ -667,6 +798,7 @@
         const payload = {
           circuit_name: circuitName.trim(),
           circuit_number: Number(circuitNumber),
+          track_length: trackLengthNum,
           segments: segments.map(exportSegment),
         };
         const defaultName = loadedFileName || `${circuitName.trim().replace(/\s+/g, "_")}.json`;
@@ -719,6 +851,12 @@
                     Copy JSON
                   </button>
                   <button
+                    onClick={handleGenerateReverse}
+                    className="px-3 py-1.5 border border-zinc-700 rounded text-sm text-zinc-300 hover:border-red-600 hover:text-red-400 transition-colors"
+                  >
+                    Generate Reverse Track
+                  </button>
+                  <button
                     onClick={handleSave}
                     className="px-3 py-1.5 bg-red-600 text-white rounded text-sm hover:bg-red-700 transition-colors font-semibold"
                   >
@@ -763,6 +901,25 @@
                     className="border border-zinc-600 rounded px-2 py-1 text-sm bg-zinc-800 text-white w-24 focus:outline-none focus:ring-1 focus:ring-red-500 placeholder-zinc-600"
                     placeholder="e.g. 1"
                   />
+                </div>
+                <div className="flex items-center gap-2">
+                  <label className="text-sm text-zinc-400 whitespace-nowrap">
+                    Track Length (m) <span className="text-red-500">*</span>
+                  </label>
+                  <div>
+                    <input
+                      type="number"
+                      value={trackLength}
+                      onChange={e => dispatch({ type: "SET_TRACK_LENGTH", value: e.target.value })}
+                      className={`border rounded px-2 py-1 text-sm bg-zinc-800 text-white w-28 focus:outline-none focus:ring-1 focus:ring-red-500 placeholder-zinc-600 ${!trackLengthValid && trackLength !== "" ? "border-red-500" : "border-zinc-600"}`}
+                      placeholder="e.g. 5793"
+                      min="0"
+                      step="any"
+                    />
+                    {!trackLengthValid && trackLength !== "" && (
+                      <p className="text-xs text-red-400 mt-0.5">Must be &gt; 0</p>
+                    )}
+                  </div>
                 </div>
               </div>
             </div>
