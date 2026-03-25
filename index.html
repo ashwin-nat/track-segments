@@ -368,6 +368,17 @@
         case "CLOSE_LOAD_MODAL":
           return { ...state, loadModalOpen: false };
 
+        case "APPLY_OFFSET": {
+          const { offset, trackLen } = action;
+          const updated = segments.map(s => {
+            if (s.start_m === "" || s.end_m === "" || isNaN(Number(s.start_m)) || isNaN(Number(s.end_m))) return s;
+            const newStart = ((Number(s.start_m) + offset) % trackLen + trackLen) % trackLen;
+            const newEnd   = ((Number(s.end_m)   + offset) % trackLen + trackLen) % trackLen;
+            return { ...s, start_m: String(+newStart.toFixed(3)), end_m: String(+newEnd.toFixed(3)) };
+          });
+          return { ...state, segments: updated, errors: validate(updated, state.trackLength) };
+        }
+
         default:
           return state;
       }
@@ -436,7 +447,13 @@
       return null;
     }
 
-    function SegmentCard({ seg, segNum, index, total, errors, dispatch, animTick, cardRef }) {
+    function offsetDisplay(value, offset, trackLen) {
+      const raw = Number(value);
+      if (isNaN(raw) || offset === 0 || !trackLen) return null;
+      return +( ((raw + offset) % trackLen + trackLen) % trackLen ).toFixed(1);
+    }
+
+    function SegmentCard({ seg, segNum, index, total, errors, dispatch, animTick, cardRef, offset, trackLengthNum }) {
       const e = errors[seg._id] || {};
       const hasError = Object.keys(e).length > 0;
       const isMoving = animTick > 0;
@@ -526,6 +543,19 @@
                   {e.end_m   && <FieldError msg={`end: ${e.end_m}`} />}
                 </div>
               )}
+
+              {/* Offset preview */}
+              {offset !== 0 && trackLengthNum > 0 && seg.start_m !== "" && seg.end_m !== "" && (() => {
+                const ds = offsetDisplay(seg.start_m, offset, trackLengthNum);
+                const de = offsetDisplay(seg.end_m,   offset, trackLengthNum);
+                if (ds === null || de === null) return null;
+                return (
+                  <div className="mt-1 text-xs text-amber-400">
+                    <span className="text-zinc-500 mr-1">offset view:</span>
+                    <span className="font-mono">{ds}m → {de}m</span>
+                  </div>
+                );
+              })()}
 
               <TypeSpecificFields seg={seg} errors={e} dispatch={dispatch} />
             </div>
@@ -660,6 +690,7 @@
       const { circuitName, circuitNumber, trackLength, segments, autoAdjust, errors, loadModalOpen, loadedFileName, needsTrackLength } = state;
       // ids: Set of segment _ids to flash; tick increments on every move to restart animation even for same segment
       const [moveAnim, setMoveAnim] = useState({ ids: new Set(), tick: 0 });
+      const [offset, setOffset] = useState(0);
       const segmentRefs = useRef({});
       const lastErrorIdRef = useRef(null);
 
@@ -816,6 +847,14 @@
         URL.revokeObjectURL(url);
       };
 
+      const handleApplyOffset = () => {
+        if (!trackLengthValid) { alert("Track length must be defined to apply offset."); return; }
+        if (offset === 0) return;
+        if (!confirm(`Apply offset of ${offset}m to all segments? This will modify all start_m / end_m values and cannot be undone.`)) return;
+        dispatch({ type: "APPLY_OFFSET", offset, trackLen: trackLengthNum });
+        setOffset(0);
+      };
+
       return (
         <div className="min-h-screen bg-black">
           {/* ── Header ── */}
@@ -922,6 +961,52 @@
                   </div>
                 </div>
               </div>
+
+              {/* Offset control */}
+              {segments.length > 0 && (
+                <div className="flex flex-wrap items-center gap-2 mt-3 pt-2 border-t border-zinc-800">
+                  <span className="text-sm text-zinc-400 whitespace-nowrap">Offset (m)</span>
+                  <div className="flex items-center gap-1">
+                    {[-50, -10].map(d => (
+                      <button key={d}
+                        onClick={() => setOffset(o => o + d)}
+                        className="px-2 py-1 border border-zinc-700 rounded text-xs text-zinc-400 hover:border-amber-600 hover:text-amber-400 transition-colors font-mono"
+                      >{d}</button>
+                    ))}
+                    <input
+                      type="number"
+                      value={offset}
+                      step="any"
+                      onChange={e => setOffset(Number(e.target.value))}
+                      className="border border-zinc-600 rounded px-2 py-1 text-sm bg-zinc-800 text-white w-24 focus:outline-none focus:ring-1 focus:ring-amber-500 text-center font-mono"
+                    />
+                    {[10, 50].map(d => (
+                      <button key={d}
+                        onClick={() => setOffset(o => o + d)}
+                        className="px-2 py-1 border border-zinc-700 rounded text-xs text-zinc-400 hover:border-amber-600 hover:text-amber-400 transition-colors font-mono"
+                      >+{d}</button>
+                    ))}
+                  </div>
+                  <button
+                    onClick={() => setOffset(0)}
+                    disabled={offset === 0}
+                    className="px-2.5 py-1 border border-zinc-700 rounded text-xs text-zinc-400 hover:border-zinc-500 hover:text-zinc-300 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                  >
+                    Reset
+                  </button>
+                  {offset !== 0 && (
+                    <>
+                      <span className="text-xs text-amber-500 font-medium">Preview active ({offset > 0 ? "+" : ""}{offset}m)</span>
+                      <button
+                        onClick={handleApplyOffset}
+                        className="px-2.5 py-1 border border-amber-700 rounded text-xs text-amber-400 hover:bg-amber-950 transition-colors font-medium"
+                      >
+                        Apply Permanently
+                      </button>
+                    </>
+                  )}
+                </div>
+              )}
             </div>
 
             {/* Global error banner */}
@@ -977,6 +1062,8 @@
                     errors={errors}
                     dispatch={dispatchWithAnim}
                     animTick={moveAnim.ids.has(seg._id) ? moveAnim.tick : 0}
+                    offset={offset}
+                    trackLengthNum={trackLengthNum}
                     cardRef={el => {
                       if (el) segmentRefs.current[seg._id] = el;
                       else delete segmentRefs.current[seg._id];
