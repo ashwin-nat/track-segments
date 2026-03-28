@@ -62,6 +62,14 @@
       return raw.split(",").map(s => s.trim()).filter(s => s !== "").map(Number);
     }
 
+    function isIncreasingConsecutive(nums) {
+      if (!Array.isArray(nums) || nums.length === 0) return false;
+      for (let i = 1; i < nums.length; i++) {
+        if (nums[i] !== nums[i - 1] + 1) return false;
+      }
+      return true;
+    }
+
     // ─── Validation ─────────────────────────────────────────────────────────────
 
     function validate(segments, trackLength = "") {
@@ -85,6 +93,7 @@
           const nums = parseCornerNumbers(seg.corner_numbers_raw);
           if (nums.length === 0)                                      e.corner_numbers = "Required, non-empty";
           else if (nums.some(n => !Number.isInteger(n) || isNaN(n))) e.corner_numbers = "All values must be integers";
+          else if (!isIncreasingConsecutive(nums))                    e.corner_numbers = "Must be increasing and consecutive (e.g. 5,6,7)";
         }
         if (i > 0 && !e.start_m) {
           const prev = segments[i - 1];
@@ -112,6 +121,18 @@
       for (const seg of segs) {
         if (seg.start_m < 0 || seg.end_m > trackLen || seg.start_m >= seg.end_m) {
           throw new Error(`Segment "${seg.name || seg.type}" (${seg.start_m}–${seg.end_m}) is out of bounds or invalid.`);
+        }
+      }
+      for (const seg of segs) {
+        if (seg.type !== "complex_corner") continue;
+        if (!Array.isArray(seg.corner_numbers) || seg.corner_numbers.length === 0) {
+          throw new Error(`Complex corner "${seg.name || seg.type}" must have a non-empty corner_numbers array.`);
+        }
+        if (seg.corner_numbers.some(n => !Number.isInteger(n) || isNaN(n))) {
+          throw new Error(`Complex corner "${seg.name || seg.type}" must use integer corner numbers.`);
+        }
+        if (!isIncreasingConsecutive(seg.corner_numbers)) {
+          throw new Error(`Complex corner "${seg.name || seg.type}" must use increasing consecutive turn numbers.`);
         }
       }
       for (let i = 1; i < segs.length; i++) {
@@ -429,7 +450,7 @@
           <div className="mt-1.5">
             <label className="block text-xs font-medium text-zinc-500 mb-0.5">
               corner_numbers <span className="text-red-500">*</span>{" "}
-              <span className="font-normal text-zinc-600">(comma-separated, e.g. 5,6,7)</span>
+              <span className="font-normal text-zinc-600">(comma-separated increasing consecutive integers, e.g. 5,6,7)</span>
             </label>
             <input
               type="text"

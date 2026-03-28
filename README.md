@@ -20,6 +20,7 @@ No build step, no install, no backend.
 - Convert segment types via dropdown (preserves name and distance fields)
 - **Auto-adjust** toggle: editing `end_m` automatically updates the next segment's `start_m`
 - Full validation on every edit: required fields, range checks, overlap detection, out-of-bounds
+- `complex_corner` validation enforces increasing consecutive turn numbers (e.g. `5,6,7`)
 - **Reverse track generation**: mirrors segment positions and inverts corner numbers
 - **Offset control**: non-destructively preview a track alignment shift, then apply permanently
 - Load JSON via file upload or paste; export via download or copy to clipboard
