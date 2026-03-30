@@ -72,6 +72,37 @@
 
     // ─── Validation ─────────────────────────────────────────────────────────────
 
+    function validateSectors(sectorsEnabled, s1, s2, trackLength) {
+      if (!sectorsEnabled) return {};
+      const errors = {};
+      const s1n = Number(s1);
+      const s2n = Number(s2);
+      const tl = Number(trackLength);
+      const hasTrackLen = trackLength !== "" && !isNaN(tl) && tl > 0;
+
+      if (s1 === "" || isNaN(s1n)) {
+        errors.s1 = "Required";
+      } else if (!Number.isInteger(s1n)) {
+        errors.s1 = "Must be an integer";
+      } else if (s1n <= 0) {
+        errors.s1 = "Must be > 0";
+      }
+
+      if (s2 === "" || isNaN(s2n)) {
+        errors.s2 = "Required";
+      } else if (!Number.isInteger(s2n)) {
+        errors.s2 = "Must be an integer";
+      } else if (!errors.s1 && s2n <= s1n) {
+        errors.s2 = "Must be > S1";
+      }
+
+      if (hasTrackLen && !errors.s2 && s2n >= tl) {
+        errors.s2 = `Must be < track_length (${tl})`;
+      }
+
+      return errors;
+    }
+
     function validate(segments, trackLength = "") {
       const trackLen = Number(trackLength);
       const hasValidTrackLen = trackLength !== "" && !isNaN(trackLen) && trackLen > 0;
@@ -250,6 +281,9 @@
       loadModalOpen: false,
       loadedFileName: "",
       needsTrackLength: false,
+      sectorsEnabled: false,
+      s1: "",
+      s2: "",
     };
 
     function loadInitialState() {
@@ -279,6 +313,9 @@
           segments,
           autoAdjust: typeof parsed.autoAdjust === "boolean" ? parsed.autoAdjust : false,
           errors: validate(segments, trackLength),
+          sectorsEnabled: typeof parsed.sectorsEnabled === "boolean" ? parsed.sectorsEnabled : false,
+          s1: (typeof parsed.s1 === "string" || typeof parsed.s1 === "number") ? String(parsed.s1) : "",
+          s2: (typeof parsed.s2 === "string" || typeof parsed.s2 === "number") ? String(parsed.s2) : "",
         };
       } catch (err) {
         console.warn("Failed to restore saved editor state:", err);
@@ -295,6 +332,12 @@
           return { ...state, circuitNumber: action.value };
         case "TOGGLE_AUTO_ADJUST":
           return { ...state, autoAdjust: !state.autoAdjust };
+        case "SET_SECTORS_ENABLED":
+          return { ...state, sectorsEnabled: action.value };
+        case "SET_S1":
+          return { ...state, s1: action.value };
+        case "SET_S2":
+          return { ...state, s2: action.value };
 
         case "UPDATE_SEGMENT": {
           const { id, field, value } = action;
@@ -367,6 +410,10 @@
         case "LOAD_JSON": {
           const loaded = action.data.segments.map(importSegment);
           const trackLength = action.data.track_length != null ? String(action.data.track_length) : "";
+          const loadedSectors = action.data.sectors;
+          const hasSectors = loadedSectors != null
+            && typeof loadedSectors.s1 === "number"
+            && typeof loadedSectors.s2 === "number";
           return {
             ...state,
             circuitName: action.data.circuit_name,
@@ -377,6 +424,9 @@
             errors: validate(loaded, trackLength),
             loadModalOpen: false,
             loadedFileName: action.fileName || "",
+            sectorsEnabled: hasSectors,
+            s1: hasSectors ? String(loadedSectors.s1) : "",
+            s2: hasSectors ? String(loadedSectors.s2) : "",
           };
         }
 
@@ -766,7 +816,7 @@
 
     function App() {
       const [state, dispatch] = useReducer(reducer, undefined, loadInitialState);
-      const { circuitName, circuitNumber, trackLength, segments, autoAdjust, errors, loadModalOpen, loadedFileName, needsTrackLength } = state;
+      const { circuitName, circuitNumber, trackLength, segments, autoAdjust, errors, loadModalOpen, loadedFileName, needsTrackLength, sectorsEnabled, s1, s2 } = state;
       // ids: Set of segment _ids to flash; tick increments on every move to restart animation even for same segment
       const [moveAnim, setMoveAnim] = useState({ ids: new Set(), tick: 0 });
       const [offset, setOffset] = useState(0);
@@ -798,6 +848,8 @@
         setToast({ id: ++modalIdRef.current, message, variant });
       };
 
+      const sectorErrors = validateSectors(sectorsEnabled, s1, s2, trackLength);
+      const hasSectorErrors = Object.keys(sectorErrors).length > 0;
       const totalErrorCount = Object.keys(errors).length;
       const errorSegmentIds = segments
         .filter(seg => Object.keys(errors[seg._id] || {}).length > 0)
@@ -805,12 +857,12 @@
 
       useEffect(() => {
         try {
-          const snapshot = { circuitName, circuitNumber, trackLength, segments, autoAdjust };
+          const snapshot = { circuitName, circuitNumber, trackLength, segments, autoAdjust, sectorsEnabled, s1, s2 };
           localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot));
         } catch (err) {
           console.warn("Failed to persist editor state:", err);
         }
-      }, [circuitName, circuitNumber, trackLength, segments, autoAdjust]);
+      }, [circuitName, circuitNumber, trackLength, segments, autoAdjust, sectorsEnabled, s1, s2]);
 
       useEffect(() => {
         if (!needsTrackLength) return;
@@ -867,12 +919,19 @@
           await showAlert("A valid track length (> 0) is required before copying JSON.");
           return;
         }
+        if (hasSectorErrors) {
+          await showAlert("Sector boundaries have validation errors. Please fix them before copying JSON.");
+          return;
+        }
         const payload = {
           circuit_name: circuitName.trim(),
           circuit_number: Number(circuitNumber),
           track_length: trackLengthNum,
           segments: segments.map(exportSegment),
         };
+        if (sectorsEnabled) {
+          payload.sectors = { s1: Number(s1), s2: Number(s2) };
+        }
         try {
           await navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
           showToast("JSON copied to clipboard!");
@@ -929,6 +988,10 @@
           await showAlert("A valid track length (> 0) is required before saving.");
           return;
         }
+        if (hasSectorErrors) {
+          await showAlert("Sector boundaries have validation errors. Please fix them before saving.");
+          return;
+        }
         if (totalErrorCount > 0) {
           if (!await showConfirm(`There are ${totalErrorCount} segment(s) with validation errors. Export anyway?`)) return;
         }
@@ -938,6 +1001,9 @@
           track_length: trackLengthNum,
           segments: segments.map(exportSegment),
         };
+        if (sectorsEnabled) {
+          payload.sectors = { s1: Number(s1), s2: Number(s2) };
+        }
         const defaultName = loadedFileName || `${circuitName.trim().replace(/\s+/g, "_")}.json`;
         const chosenName = await showPrompt("Save as:", defaultName);
         if (!chosenName) return;
@@ -1077,6 +1143,52 @@
                         )}
                       </div>
                     </div>
+                  </div>
+
+                  {/* Sectors */}
+                  <div className="flex flex-wrap items-center gap-3 mt-3 pt-2 border-t border-zinc-800">
+                    <label className="flex items-center gap-1.5 text-sm cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={sectorsEnabled}
+                        onChange={e => dispatch({ type: "SET_SECTORS_ENABLED", value: e.target.checked })}
+                        className="accent-red-600"
+                      />
+                      <span className="text-zinc-300 font-medium">Sectors</span>
+                      <span className="text-xs text-zinc-600">(optional)</span>
+                    </label>
+                    {sectorsEnabled && (
+                      <>
+                        <div className="flex items-center gap-1.5">
+                          <label className="text-sm text-zinc-400 whitespace-nowrap">S1 boundary (m)</label>
+                          <div>
+                            <input
+                              type="number"
+                              value={s1}
+                              step="1"
+                              onChange={e => dispatch({ type: "SET_S1", value: e.target.value })}
+                              className={`border rounded px-2 py-1 text-sm bg-zinc-800 text-white w-24 focus:outline-none focus:ring-1 focus:ring-red-500 placeholder-zinc-600 ${sectorErrors.s1 ? "border-red-500" : "border-zinc-600"}`}
+                              placeholder="e.g. 1800"
+                            />
+                            {sectorErrors.s1 && <p className="text-xs text-red-400 mt-0.5">{sectorErrors.s1}</p>}
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          <label className="text-sm text-zinc-400 whitespace-nowrap">S2 boundary (m)</label>
+                          <div>
+                            <input
+                              type="number"
+                              value={s2}
+                              step="1"
+                              onChange={e => dispatch({ type: "SET_S2", value: e.target.value })}
+                              className={`border rounded px-2 py-1 text-sm bg-zinc-800 text-white w-24 focus:outline-none focus:ring-1 focus:ring-red-500 placeholder-zinc-600 ${sectorErrors.s2 ? "border-red-500" : "border-zinc-600"}`}
+                              placeholder="e.g. 3600"
+                            />
+                            {sectorErrors.s2 && <p className="text-xs text-red-400 mt-0.5">{sectorErrors.s2}</p>}
+                          </div>
+                        </div>
+                      </>
+                    )}
                   </div>
 
                   {/* Offset control */}

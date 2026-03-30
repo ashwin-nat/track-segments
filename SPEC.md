@@ -77,8 +77,14 @@ Fields:
 
 ```ts id="j6b4b0"
 type TrackData = {
+  circuit_name: string
+  circuit_number: number
   track_length: number
   segments: Segment[]
+  sectors?: {        // optional — omitted entirely when not configured
+    s1: number       // integer, meters; end of sector 1
+    s2: number       // integer, meters; end of sector 2
+  }
 }
 ```
 
@@ -92,10 +98,31 @@ type TrackData = {
 
   * **New**
   * **Load JSON**
-  * **Save / Download JSON**
-* Field:
+  * **Copy JSON**
+  * **Generate Reverse Track**
+  * **Download JSON**
+  * **Auto-adjust** toggle (end_m → next start_m)
 
-  * `track_length` (number input)
+* Collapsible fields section:
+
+  * `circuit_name` (text input, required)
+  * `circuit_number` (number input, required)
+  * `track_length` (number input, required)
+  * **Sectors (Optional)** — see below
+  * Offset control — non-destructive preview with modulo wraparound; "Apply Permanently" commits
+
+---
+
+## 1a. Sectors (Optional)
+
+Shown in the collapsible header section.
+
+* **Enable sectors** checkbox/toggle
+* When enabled, two integer inputs appear:
+  * `S1 boundary (m)` — end of sector 1
+  * `S2 boundary (m)` — end of sector 2
+* When disabled — inputs hidden, `sectors` omitted from export
+* When loading JSON that contains `sectors` — toggle auto-enables and fields pre-fill
 
 ---
 
@@ -300,7 +327,24 @@ Error if violated:
 
 ---
 
-## 4. Error Display
+## 4. Sector Validation
+
+When sectors are enabled:
+
+```
+s1 > 0
+s1 < s2
+s2 < track_length
+s1 and s2 must be integers (no floats)
+```
+
+* Inline errors shown below each input
+* Export (Copy JSON / Download JSON) blocked until sector errors are resolved
+* Segment validation is unaffected
+
+---
+
+## 5. Error Display
 
 * Inline field errors (red border)
 * Segment-level error badge
@@ -317,16 +361,17 @@ Error if violated:
 * Paste JSON OR upload file
 * Validate before accepting
 * Show errors if invalid
+* If `sectors` present → auto-enable toggle and pre-fill `s1` / `s2`
+* If `sectors` absent → toggle remains disabled
 
 ---
 
 ## Export
 
-* Clean JSON only
-* No UI-specific fields
-* Format:
-
-  * 2-space indentation
+* Clean JSON only — no internal fields (`_id`, `corner_numbers_raw`)
+* `sectors` included only when toggle is enabled and values are valid
+* `sectors` omitted entirely (not `null`, not `{}`) when toggle is off
+* Format: 2-space indentation
 
 ---
 
@@ -363,13 +408,19 @@ When enabled:
 
 ---
 
-### B. Segment preview label
+### B. Offset preview
 
-For complex corner:
+* Non-destructive: shows shifted positions on each segment card without modifying state
+* Modulo wraparound using `track_length`
+* "Apply Permanently" commits offset to all segment `start_m` / `end_m` values
 
-```id="sn2av3"
-Les Combes (T5–T7)
-```
+---
+
+### C. Sectors toggle
+
+* Optional track-level metadata
+* Does not affect segment layout or validation
+* When disabled: no `sectors` key in output
 
 ---
 
@@ -394,8 +445,9 @@ Les Combes (T5–T7)
 
 * No inheritance modeling
 * No backend
-* No persistence (optional localStorage)
+* No persistence (optional localStorage — implemented)
 * No collaboration
+* Sectors do not define segment boundaries — segments remain independent
 
 ---
 
@@ -408,9 +460,14 @@ Les Combes (T5–T7)
   * Insert anywhere
   * Convert types
   * Reorder segments
+  * Optionally configure sector boundaries (S1, S2)
+  * Load existing JSON with or without sectors
 
 * Tool:
 
   * Prevents invalid schema
   * Detects overlap/order issues
+  * Validates sector boundaries (integer, ordered, within track length) when enabled
+  * Blocks export if sector errors exist
+  * Omits `sectors` entirely from output when toggle is off
   * Exports valid JSON for Python system
