@@ -615,6 +615,26 @@
       );
     }
 
+    // Small "info" glyph with a themed hover/focus tooltip for longer help text.
+    function InfoHint({ text, className = "" }) {
+      return (
+        <span className={`relative group inline-flex align-middle ${className}`}>
+          <i
+            tabIndex={0}
+            role="img"
+            aria-label={text}
+            className="bi bi-info-circle text-sm text-zinc-500 hover:text-zinc-300 focus:text-zinc-300 focus:outline-none cursor-help transition-colors"
+          />
+          <span
+            role="tooltip"
+            className="pointer-events-none absolute top-full left-0 mt-1.5 z-50 w-64 whitespace-pre-line break-words rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs font-normal normal-case tracking-normal leading-snug text-zinc-100 shadow-xl opacity-0 translate-y-[-2px] transition-all duration-150 group-hover:opacity-100 group-hover:translate-y-0 group-focus-within:opacity-100 group-focus-within:translate-y-0"
+          >
+            {text}
+          </span>
+        </span>
+      );
+    }
+
     function TypeSpecificFields({ seg, errors, dispatch }) {
       if (seg.type === "corner") {
         return (
@@ -1458,7 +1478,10 @@
                   {/* Offset control */}
                   {segments.length > 0 && (
                     <div className="flex flex-wrap items-center gap-2 mt-3 pt-2 border-t border-zinc-800">
-                      <span className="text-sm text-zinc-400 whitespace-nowrap">Offset (m)</span>
+                      <span className="text-sm text-zinc-400 whitespace-nowrap inline-flex items-center gap-1">
+                        Offset (m)
+                        <InfoHint text={"Shifts every segment's start_m / end_m by the same amount, wrapping around at track_length.\n\nAfter a reversal, things often don't line up right away. The start/finish line usually moves from where it sits on the normal layout."} />
+                      </span>
                       <div className="flex items-center gap-1">
                         {[-50, -10].map(d => (
                           <button key={d}
