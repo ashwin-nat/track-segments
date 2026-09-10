@@ -94,14 +94,16 @@ type TrackData = {
 
 ## 1. Header Bar
 
-* Buttons:
+* Buttons (icon-only, each with a hover/focus tooltip):
 
   * **New**
   * **Load JSON**
+  * **Fetch from GitHub** — see 1b
   * **Copy JSON**
   * **Generate Reverse Track**
   * **Download JSON**
   * **Auto-adjust** toggle (end_m → next start_m)
+  * Header collapse/expand chevron (right-aligned)
 
 * Collapsible fields section:
 
@@ -123,6 +125,33 @@ Shown in the collapsible header section.
   * `S2 boundary (m)` — end of sector 2
 * When disabled — inputs hidden, `sectors` omitted from export
 * When loading JSON that contains `sectors` — toggle auto-enables and fields pre-fill
+
+---
+
+## 1b. Fetch from GitHub (Remote Source)
+
+Lets non-technical users load the latest track definitions without cloning
+the repo or installing Git.
+
+* **Source**: public `ashwin-nat/pits-n-giggles` repo, folder `assets/track-segments`
+* **Modal flow**: select branch → select JSON file → **Fetch**
+  * Branches are listed from the GitHub REST API; the repo's default branch
+    is selected first. Changing the branch refreshes the file list.
+  * Only `*.json` files in `assets/track-segments` are shown; the filename
+    is displayed as-is (no circuit-name inference).
+* **On fetch**: the file is retrieved from the selected branch and handed to
+  the normal load path (same validation as paste/upload). The repo filename
+  becomes the Save/Download default so the origin is retained.
+* **Isolation**: all GitHub logic lives in a self-contained `GitHubTrackSource`
+  helper; the editor has no GitHub-specific concepts. Leaves room for other
+  sources later.
+* **Auth**: none. Unauthenticated GitHub API (60 requests/hour per IP).
+* **Error handling**: network/GitHub unavailable, branch list failure, file
+  list failure, file retrieval failure, file changed/removed between listing
+  and fetch, and invalid/unparseable JSON are all surfaced in the modal. A
+  GitHub failure never blocks local editing.
+* **Non-goals**: no branch creation, commits, pushes, pull requests, or
+  writes to the remote repo.
 
 ---
 
@@ -462,6 +491,8 @@ When enabled:
   * Reorder segments
   * Optionally configure sector boundaries (S1, S2)
   * Load existing JSON with or without sectors
+  * Fetch an existing track definition from the public GitHub repo (branch +
+    file selection) with no Git install, then edit and save it locally
 
 * Tool:
 

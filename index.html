@@ -3,7 +3,9 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Track Segment Editor – Pits n' Giggles</title>
+  <title>Track Segment Editor - Pits n' Giggles</title>
+  <link rel="icon" href="favicon.ico" sizes="any" />
+  <link rel="apple-touch-icon" href="favicon.ico" />
   <script src="https://cdn.tailwindcss.com"></script>
   <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
@@ -269,6 +271,109 @@
       if (maxCounter > _counter) _counter = maxCounter;
     }
 
+    // ─── GitHub Track Source ────────────────────────────────────────────────────
+    // Self-contained remote file source. Knows nothing about React or editor state.
+    // Exposes the public pits-n-giggles repo's branches and track-segment JSON files.
+    // Keeping this isolated leaves room for other sources (local files, etc.) later.
+
+    const GitHubTrackSource = (() => {
+      const OWNER = "ashwin-nat";
+      const REPO = "pits-n-giggles";
+      const TRACK_DIR = "assets/track-segments";
+      const API = "https://api.github.com";
+
+      class GitHubError extends Error {}
+
+      async function ghFetch(url, opts = {}) {
+        let res;
+        try {
+          res = await fetch(url, {
+            ...opts,
+            headers: { Accept: "application/vnd.github+json", ...(opts.headers || {}) },
+          });
+        } catch (err) {
+          throw new GitHubError("GitHub or the network is unavailable. Check your connection and try again.");
+        }
+        if (res.status === 403 || res.status === 429) {
+          if (res.headers.get("x-ratelimit-remaining") === "0") {
+            throw new GitHubError("GitHub API rate limit reached (60 requests/hour for unauthenticated use). Please wait a while and try again.");
+          }
+          throw new GitHubError(`GitHub refused the request (HTTP ${res.status}).`);
+        }
+        if (res.status === 404) {
+          throw new GitHubError("Not found on GitHub — the branch, folder, or file may have been moved or removed.");
+        }
+        if (!res.ok) {
+          throw new GitHubError(`GitHub request failed (HTTP ${res.status}).`);
+        }
+        return res;
+      }
+
+      // Non-fatal: returns null if the repo metadata can't be read; caller falls back.
+      async function getDefaultBranch() {
+        try {
+          const res = await ghFetch(`${API}/repos/${OWNER}/${REPO}`);
+          const data = await res.json();
+          return typeof data.default_branch === "string" ? data.default_branch : null;
+        } catch (err) {
+          if (err instanceof GitHubError) return null;
+          throw err;
+        }
+      }
+
+      async function listBranches() {
+        const names = [];
+        let url = `${API}/repos/${OWNER}/${REPO}/branches?per_page=100`;
+        while (url) {
+          const res = await ghFetch(url);
+          const page = await res.json();
+          if (!Array.isArray(page)) throw new GitHubError("Unexpected branch-list response from GitHub.");
+          for (const b of page) if (b && typeof b.name === "string") names.push(b.name);
+          const m = /<([^>]+)>;\s*rel="next"/.exec(res.headers.get("link") || "");
+          url = m ? m[1] : null;
+        }
+        if (names.length === 0) throw new GitHubError("GitHub returned no branches for this repository.");
+        return names;
+      }
+
+      async function listTracks(branch) {
+        const res = await ghFetch(
+          `${API}/repos/${OWNER}/${REPO}/contents/${TRACK_DIR}?ref=${encodeURIComponent(branch)}`
+        );
+        const entries = await res.json();
+        if (!Array.isArray(entries)) {
+          throw new GitHubError(`Could not read ${TRACK_DIR} on branch "${branch}".`);
+        }
+        return entries
+          .filter(e => e && e.type === "file" && /\.json$/i.test(e.name))
+          .map(e => ({ name: e.name, path: e.path, downloadUrl: e.download_url, sha: e.sha }))
+          .sort((a, b) => a.name.localeCompare(b.name));
+      }
+
+      // Returns parsed JSON for the given track entry on the given branch.
+      // Throws GitHubError on network / HTTP / parse failure (incl. file changed
+      // or removed between listing and fetching -> 404).
+      async function fetchTrack(track, branch) {
+        let text;
+        if (track.downloadUrl) {
+          text = await (await ghFetch(track.downloadUrl)).text();
+        } else {
+          const res = await ghFetch(
+            `${API}/repos/${OWNER}/${REPO}/contents/${track.path.split("/").map(encodeURIComponent).join("/")}?ref=${encodeURIComponent(branch)}`,
+            { headers: { Accept: "application/vnd.github.raw+json" } }
+          );
+          text = await res.text();
+        }
+        try {
+          return JSON.parse(text);
+        } catch (err) {
+          throw new GitHubError("The file returned by GitHub is not valid JSON.");
+        }
+      }
+
+      return { OWNER, REPO, TRACK_DIR, GitHubError, getDefaultBranch, listBranches, listTracks, fetchTrack };
+    })();
+
     // ─── Reducer ─────────────────────────────────────────────────────────────────
 
     const initialState = {
@@ -279,6 +384,7 @@
       autoAdjust: false,
       errors: {},
       loadModalOpen: false,
+      githubModalOpen: false,
       loadedFileName: "",
       needsTrackLength: false,
       sectorsEnabled: false,
@@ -423,6 +529,7 @@
             segments: loaded,
             errors: validate(loaded, trackLength),
             loadModalOpen: false,
+            githubModalOpen: false,
             loadedFileName: action.fileName || "",
             sectorsEnabled: hasSectors,
             s1: hasSectors ? String(loadedSectors.s1) : "",
@@ -446,6 +553,12 @@
 
         case "CLOSE_LOAD_MODAL":
           return { ...state, loadModalOpen: false };
+
+        case "OPEN_GITHUB_MODAL":
+          return { ...state, githubModalOpen: true };
+
+        case "CLOSE_GITHUB_MODAL":
+          return { ...state, githubModalOpen: false };
 
         case "APPLY_OFFSET": {
           const { offset, trackLen } = action;
@@ -474,6 +587,32 @@
       return `w-full border rounded px-2 py-1 text-sm bg-zinc-800 text-white placeholder-zinc-500 focus:outline-none focus:ring-1 ${
         hasError ? "border-red-500 focus:ring-red-500" : "border-zinc-600 focus:ring-red-500"
       }`;
+    }
+
+    // Icon-only header button with a themed hover/focus tooltip.
+    function IconButton({ icon, label, onClick, variant = "default" }) {
+      const variants = {
+        default: "border border-zinc-700 text-zinc-300 hover:border-zinc-400 hover:text-white",
+        danger:  "border border-zinc-700 text-zinc-300 hover:border-red-600 hover:text-red-400",
+        primary: "bg-red-600 text-white hover:bg-red-700",
+      };
+      return (
+        <span className="relative group inline-flex">
+          <button
+            onClick={onClick}
+            aria-label={label}
+            className={`w-9 h-8 flex items-center justify-center rounded transition-colors ${variants[variant]}`}
+          >
+            <i className={`bi ${icon} text-base`} />
+          </button>
+          <span
+            role="tooltip"
+            className="pointer-events-none absolute top-full left-1/2 -translate-x-1/2 mt-1.5 z-40 whitespace-nowrap rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs font-normal text-zinc-100 shadow-lg opacity-0 translate-y-[-2px] transition-all duration-150 group-hover:opacity-100 group-hover:translate-y-0 group-focus-within:opacity-100 group-focus-within:translate-y-0"
+          >
+            {label}
+          </span>
+        </span>
+      );
     }
 
     function TypeSpecificFields({ seg, errors, dispatch }) {
@@ -756,6 +895,161 @@
       );
     }
 
+    // ─── GitHub Fetch Modal ─────────────────────────────────────────────────────
+    // Thin UI over GitHubTrackSource. On success it hands the parsed JSON to the
+    // existing LOAD_JSON flow — the editor never sees a GitHub-specific concept.
+
+    function GitHubModal({ dispatch }) {
+      const [branches, setBranches] = useState([]);
+      const [branch, setBranch] = useState("");
+      const [tracks, setTracks] = useState([]);
+      const [trackPath, setTrackPath] = useState("");
+      const [loadingBranches, setLoadingBranches] = useState(true);
+      const [loadingTracks, setLoadingTracks] = useState(false);
+      const [fetching, setFetching] = useState(false);
+      const [error, setError] = useState("");
+
+      const close = () => dispatch({ type: "CLOSE_GITHUB_MODAL" });
+
+      // Load the branch list once. Default branch is selected and listed first.
+      useEffect(() => {
+        let cancelled = false;
+        (async () => {
+          setLoadingBranches(true);
+          setError("");
+          try {
+            const [def, names] = await Promise.all([
+              GitHubTrackSource.getDefaultBranch(),
+              GitHubTrackSource.listBranches(),
+            ]);
+            if (cancelled) return;
+            const initial = def && names.includes(def)
+              ? def
+              : (names.includes("main") ? "main" : names[0]);
+            setBranches([initial, ...names.filter(n => n !== initial)]);
+            setBranch(initial);
+          } catch (err) {
+            if (!cancelled) setError(err.message || "Could not retrieve the branch list from GitHub.");
+          } finally {
+            if (!cancelled) setLoadingBranches(false);
+          }
+        })();
+        return () => { cancelled = true; };
+      }, []);
+
+      // Refresh the track-file list whenever the selected branch changes.
+      useEffect(() => {
+        if (!branch) return;
+        let cancelled = false;
+        (async () => {
+          setLoadingTracks(true);
+          setError("");
+          setTracks([]);
+          setTrackPath("");
+          try {
+            const list = await GitHubTrackSource.listTracks(branch);
+            if (cancelled) return;
+            setTracks(list);
+            if (list.length > 0) setTrackPath(list[0].path);
+          } catch (err) {
+            if (!cancelled) setError(err.message || "Could not retrieve the track-file list from GitHub.");
+          } finally {
+            if (!cancelled) setLoadingTracks(false);
+          }
+        })();
+        return () => { cancelled = true; };
+      }, [branch]);
+
+      const handleFetch = async () => {
+        const track = tracks.find(t => t.path === trackPath);
+        if (!track) return;
+        setFetching(true);
+        setError("");
+        try {
+          const data = await GitHubTrackSource.fetchTrack(track, branch);
+          const verr = validateLoadedData(data);
+          if (verr) {
+            setError(`GitHub file is not a valid track definition: ${verr}`);
+            setFetching(false);
+            return;
+          }
+          // Source info (branch / file path) is retained via loadedFileName for the
+          // Save dialog default; the fetched JSON now enters the normal load flow.
+          dispatch({ type: "LOAD_JSON", data, fileName: track.name });
+        } catch (err) {
+          setError(err.message || "Could not retrieve the selected file from GitHub.");
+          setFetching(false);
+        }
+      };
+
+      const busy = loadingBranches || loadingTracks || fetching;
+
+      return (
+        <div className="fixed inset-0 bg-black/75 flex items-center justify-center z-50" onClick={close}>
+          <div
+            className="rounded-xl shadow-2xl p-6 w-full max-w-lg mx-4 border border-zinc-700"
+            style={{ backgroundColor: "#1a1a1a" }}
+            onClick={e => e.stopPropagation()}
+          >
+            <h2 className="text-lg font-semibold mb-1 text-white">Fetch from GitHub</h2>
+            <p className="text-xs text-zinc-500 mb-4 font-mono">
+              {GitHubTrackSource.OWNER}/{GitHubTrackSource.REPO} &middot; {GitHubTrackSource.TRACK_DIR}
+            </p>
+
+            <div className="mb-4">
+              <label className="block text-sm text-zinc-400 mb-1">Branch</label>
+              <select
+                value={branch}
+                disabled={loadingBranches || fetching}
+                onChange={e => setBranch(e.target.value)}
+                className="w-full border border-zinc-600 rounded px-2 py-1.5 text-sm bg-zinc-800 text-white focus:outline-none focus:ring-1 focus:ring-red-500 disabled:opacity-50"
+              >
+                {loadingBranches
+                  ? <option>Loading branches&hellip;</option>
+                  : branches.map(b => <option key={b} value={b}>{b}</option>)}
+              </select>
+            </div>
+
+            <div className="mb-4">
+              <label className="block text-sm text-zinc-400 mb-1">Track file</label>
+              <select
+                value={trackPath}
+                disabled={busy || tracks.length === 0}
+                onChange={e => setTrackPath(e.target.value)}
+                className="w-full border border-zinc-600 rounded px-2 py-1.5 text-sm bg-zinc-800 text-white focus:outline-none focus:ring-1 focus:ring-red-500 disabled:opacity-50"
+              >
+                {loadingTracks && <option>Loading track files&hellip;</option>}
+                {!loadingTracks && tracks.length === 0 && !error && <option>No JSON files found</option>}
+                {!loadingTracks && tracks.map(t => <option key={t.path} value={t.path}>{t.name}</option>)}
+              </select>
+            </div>
+
+            {error && (
+              <div className="mb-3 text-sm text-red-400 bg-red-950 border border-red-800 rounded px-3 py-2">
+                {error}
+              </div>
+            )}
+
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={close}
+                className="px-4 py-2 border border-zinc-600 rounded text-sm text-zinc-300 hover:border-zinc-400 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleFetch}
+                disabled={busy || !trackPath}
+                className="px-4 py-2 bg-red-600 text-white rounded text-sm hover:bg-red-700 transition-colors font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {fetching ? "Fetching…" : "Fetch"}
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
     // ─── App-level Modal & Toast ─────────────────────────────────────────────────
 
     function AppModal({ state }) {
@@ -816,7 +1110,7 @@
 
     function App() {
       const [state, dispatch] = useReducer(reducer, undefined, loadInitialState);
-      const { circuitName, circuitNumber, trackLength, segments, autoAdjust, errors, loadModalOpen, loadedFileName, needsTrackLength, sectorsEnabled, s1, s2 } = state;
+      const { circuitName, circuitNumber, trackLength, segments, autoAdjust, errors, loadModalOpen, githubModalOpen, loadedFileName, needsTrackLength, sectorsEnabled, s1, s2 } = state;
       // ids: Set of segment _ids to flash; tick increments on every move to restart animation even for same segment
       const [moveAnim, setMoveAnim] = useState({ ids: new Set(), tick: 0 });
       const [offset, setOffset] = useState(0);
@@ -1038,51 +1332,13 @@
 
               {/* Title + actions row */}
               <div className="flex flex-wrap items-center gap-3 mb-2">
-                <div className="flex items-center gap-1.5 mr-1">
-                  <div>
-                    <h1 className="font-bold text-white text-base leading-tight">Track Segment Editor</h1>
-                    <p className="text-xs text-red-500 font-semibold tracking-widest uppercase">Pits n' Giggles</p>
-                  </div>
-                  <button
-                    onClick={() => setHeaderCollapsed(c => !c)}
-                    className="self-start mt-0.5 text-zinc-600 hover:text-zinc-300 transition-colors border border-zinc-700 rounded-full w-5 h-5 flex items-center justify-center"
-                    title={headerCollapsed ? "Expand header" : "Collapse header"}
-                  >
-                    <i className={`bi ${headerCollapsed ? "bi-chevron-down" : "bi-chevron-up"} text-xs`} />
-                  </button>
-                </div>
-
-                <div className="flex flex-wrap items-center gap-2">
-                  <button
-                    onClick={handleNew}
-                    className="px-3 py-1.5 border border-zinc-700 rounded text-sm text-zinc-300 hover:border-zinc-400 hover:text-white transition-colors"
-                  >
-                    New
-                  </button>
-                  <button
-                    onClick={() => dispatch({ type: "OPEN_LOAD_MODAL" })}
-                    className="px-3 py-1.5 border border-zinc-700 rounded text-sm text-zinc-300 hover:border-zinc-400 hover:text-white transition-colors"
-                  >
-                    Load JSON
-                  </button>
-                  <button
-                    onClick={handleCopyJSON}
-                    className="px-3 py-1.5 border border-zinc-700 rounded text-sm text-zinc-300 hover:border-zinc-400 hover:text-white transition-colors"
-                  >
-                    Copy JSON
-                  </button>
-                  <button
-                    onClick={handleGenerateReverse}
-                    className="px-3 py-1.5 border border-zinc-700 rounded text-sm text-zinc-300 hover:border-red-600 hover:text-red-400 transition-colors"
-                  >
-                    Generate Reverse Track
-                  </button>
-                  <button
-                    onClick={handleSave}
-                    className="px-3 py-1.5 bg-red-600 text-white rounded text-sm hover:bg-red-700 transition-colors font-semibold"
-                  >
-                    Download JSON
-                  </button>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <IconButton icon="bi-file-earmark-plus" label="New" onClick={handleNew} />
+                  <IconButton icon="bi-folder2-open" label="Load JSON" onClick={() => dispatch({ type: "OPEN_LOAD_MODAL" })} />
+                  <IconButton icon="bi-github" label="Fetch from GitHub" onClick={() => dispatch({ type: "OPEN_GITHUB_MODAL" })} />
+                  <IconButton icon="bi-clipboard" label="Copy JSON" onClick={handleCopyJSON} />
+                  <IconButton icon="bi-arrow-left-right" label="Generate Reverse Track" onClick={handleGenerateReverse} variant="danger" />
+                  <IconButton icon="bi-download" label="Download JSON" onClick={handleSave} variant="primary" />
                   <label className="flex items-center gap-1.5 text-sm text-zinc-400 cursor-pointer select-none ml-1">
                     <input
                       type="checkbox"
@@ -1094,6 +1350,14 @@
                     <span className="text-xs text-zinc-600">(end_m → next start_m)</span>
                   </label>
                 </div>
+
+                <button
+                  onClick={() => setHeaderCollapsed(c => !c)}
+                  className="ml-auto text-zinc-300 hover:text-white transition-colors border border-zinc-700 rounded-full w-6 h-6 flex items-center justify-center flex-shrink-0"
+                  title={headerCollapsed ? "Expand header" : "Collapse header"}
+                >
+                  <i className={`bi ${headerCollapsed ? "bi-chevron-down" : "bi-chevron-up"} text-base`} />
+                </button>
               </div>
 
               {/* Circuit fields + offset — collapsible */}
@@ -1317,6 +1581,7 @@
           </main>
 
           {loadModalOpen && <LoadModal dispatch={dispatch} />}
+          {githubModalOpen && <GitHubModal dispatch={dispatch} />}
           <AppModal state={modalState} />
           {toast && <Toast key={toast.id} id={toast.id} message={toast.message} variant={toast.variant} onDone={() => setToast(null)} />}
         </div>

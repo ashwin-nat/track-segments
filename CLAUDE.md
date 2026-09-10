@@ -64,7 +64,11 @@ A single-file browser-based editor for creating and editing F1 track segment JSO
 - **localStorage key:** `track-segment-editor.state.v1`
 
 ### Action Types (reducer)
-`SET_CIRCUIT_NAME`, `SET_CIRCUIT_NUMBER`, `SET_TRACK_LENGTH`, `ADD_SEGMENT`, `INSERT_ABOVE`, `INSERT_BELOW`, `UPDATE_SEGMENT`, `CHANGE_TYPE`, `MOVE_UP`, `MOVE_DOWN`, `DELETE_SEGMENT`, `LOAD_JSON`, `NEW`, `APPLY_OFFSET`, `SET_SECTORS_ENABLED`, `SET_S1`, `SET_S2`
+`SET_CIRCUIT_NAME`, `SET_CIRCUIT_NUMBER`, `SET_TRACK_LENGTH`, `ADD_SEGMENT`, `INSERT_ABOVE`, `INSERT_BELOW`, `UPDATE_SEGMENT`, `CHANGE_TYPE`, `MOVE_UP`, `MOVE_DOWN`, `DELETE_SEGMENT`, `LOAD_JSON`, `NEW`, `APPLY_OFFSET`, `SET_SECTORS_ENABLED`, `SET_S1`, `SET_S2`, `OPEN_GITHUB_MODAL`, `CLOSE_GITHUB_MODAL`
+
+### GitHub Track Source
+- **`GitHubTrackSource`** — self-contained IIFE, no React/editor knowledge; fetches branches + `assets/track-segments/*.json` from the public `ashwin-nat/pits-n-giggles` repo via the GitHub REST API + `raw.githubusercontent.com`. Unauthenticated (60 req/hr/IP); throws `GitHubError` with user-facing messages.
+- **`GitHubModal`** — thin UI (branch selector → track selector → Fetch). On success dispatches the existing `LOAD_JSON` with `fileName` = the repo filename, so the fetched track enters the normal load/validation flow and the Save dialog defaults to that name. GitHub failures never leave the editor unusable.
 
 ### Sectors state (in reducer)
 - `sectorsEnabled: boolean` — controls toggle and export

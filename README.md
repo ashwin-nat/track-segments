@@ -24,7 +24,9 @@ No build step, no install, no backend.
 - **Reverse track generation**: mirrors segment positions and inverts corner numbers
 - **Offset control**: non-destructively preview a track alignment shift, then apply permanently
 - Load JSON via file upload or paste; export via download or copy to clipboard
+- **Fetch from GitHub**: pull track definitions straight from the public `ashwin-nat/pits-n-giggles` repo — pick a branch and a JSON file, no clone or Git install needed
 - State persisted to localStorage between sessions
+- Icon toolbar with hover/focus tooltips
 
 ## Output Format
 
