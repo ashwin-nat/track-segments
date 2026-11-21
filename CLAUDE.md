@@ -31,7 +31,11 @@ A single-file browser-based editor for creating and editing F1 track segment JSO
   "sectors": { "s1": 1800, "s2": 3600 }
 }
 ```
-`sectors` is **optional** — omitted entirely (not `null`, not `{}`) when the toggle is off.
+`sectors` is **required**: Pits n' Giggles refuses to load a track file without it.
+
+Any other field, top-level or per segment (e.g. `schema_version`, `drs_zones`, `brake_boards`, `corners`),
+is carried through untouched, in its original key order, so files written by newer tools survive a
+load/save round trip.
 
 ### Segment Types
 
@@ -53,36 +57,44 @@ A single-file browser-based editor for creating and editing F1 track segment JSO
 ### Internal Editor Fields (not exported)
 - `_id` — unique ID (`seg_<counter>_<random>`), used as React key and error map key
 - `corner_numbers_raw` — string representation for the `complex_corner` input (e.g. `"2,3"`)
+- `_extra` — fields the editor does not understand, merged back on export
+- `_keyOrder` — the segment's key order in the source file, reused on export
+- Top-level equivalents in reducer state: `extraTop` and `topKeyOrder`
 
 ## Architecture
 
 - **Single `useReducer`** manages all state — no useState for app logic
-- **`validate(segments, trackLength)`** runs on every state update, returns error map keyed by `_id`
-- **`validateSectors(sectorsEnabled, s1, s2, trackLength)`** — separate function, computed inline in App (not stored in reducer state); returns `{}` when sectors disabled
-- **`exportSegment(seg)`** strips internal fields for JSON output
-- **`importSegment(seg)`** converts raw JSON to editor state (adds `_id`, `corner_numbers_raw`)
+- **`validate(segments, trackLength)`** runs on every state update, returns error map keyed by `_id`. Includes the file-wide corner numbering rule from Pits n' Giggles: 1, 2, 3... in lap order, no gaps or repeats, and at least 2 numbers per `complex_corner`. A `complex_corner` that carries `corners` (sub-corners, not editable here) must keep them numbered like `corner_numbers` and tiling its range exactly
+- **`validateSectors(s1, s2, trackLength)`** — separate function, computed inline in App (not stored in reducer state)
+- **`exportSegment(seg, includeExtra = true)`** strips internal fields for JSON output. `name` is written for straights and whenever non-empty, never as `""`, matching `lib/track_segments_classifier`. `CHANGE_TYPE` drops `corners` (not a complex corner) and `brake_boards` (not a corner). Never pass it straight to `.map()`, which would supply the index as `includeExtra`
+- **`importSegment(seg)`** converts raw JSON to editor state (adds `_id`, `corner_numbers_raw`, `_extra`, `_keyOrder`)
+- **`buildPayload(state)`** builds the exported file; the only place Copy JSON and Download JSON get it from
 - **localStorage key:** `track-segment-editor.state.v1`
 
 ### Action Types (reducer)
-`SET_CIRCUIT_NAME`, `SET_CIRCUIT_NUMBER`, `SET_TRACK_LENGTH`, `ADD_SEGMENT`, `INSERT_ABOVE`, `INSERT_BELOW`, `UPDATE_SEGMENT`, `CHANGE_TYPE`, `MOVE_UP`, `MOVE_DOWN`, `DELETE_SEGMENT`, `LOAD_JSON`, `NEW`, `APPLY_OFFSET`, `SET_SECTORS_ENABLED`, `SET_S1`, `SET_S2`, `OPEN_GITHUB_MODAL`, `CLOSE_GITHUB_MODAL`
+`SET_CIRCUIT_NAME`, `SET_CIRCUIT_NUMBER`, `SET_TRACK_LENGTH`, `ADD_SEGMENT`, `INSERT_ABOVE`, `INSERT_BELOW`, `UPDATE_SEGMENT`, `CHANGE_TYPE`, `MOVE_UP`, `MOVE_DOWN`, `DELETE_SEGMENT`, `LOAD_JSON`, `NEW`, `APPLY_OFFSET`, `SET_S1`, `SET_S2`, `OPEN_GITHUB_MODAL`, `CLOSE_GITHUB_MODAL`
 
 ### GitHub Track Source
 - **`GitHubTrackSource`** — self-contained IIFE, no React/editor knowledge; fetches branches + `assets/track-segments/*.json` from the public `ashwin-nat/pits-n-giggles` repo via the GitHub REST API + `raw.githubusercontent.com`. Unauthenticated (60 req/hr/IP); throws `GitHubError` with user-facing messages.
 - **`GitHubModal`** — thin UI (branch selector → track selector → Fetch). On success dispatches the existing `LOAD_JSON` with `fileName` = the repo filename, so the fetched track enters the normal load/validation flow and the Save dialog defaults to that name. GitHub failures never leave the editor unusable.
 
 ### Sectors state (in reducer)
-- `sectorsEnabled: boolean` — controls toggle and export
 - `s1: string` — raw input value for S1 boundary (meters)
 - `s2: string` — raw input value for S2 boundary (meters)
 - Persisted to localStorage; restored on load
-- `LOAD_JSON` auto-enables toggle and pre-fills `s1`/`s2` when loaded JSON contains a valid `sectors` object
+- `LOAD_JSON` pre-fills `s1`/`s2` when loaded JSON contains a valid `sectors` object; otherwise both show as required
+
+### Data the editor does not edit
+- Offset is blocked when the file has extra fields, since it would shift segments but not their extra positions
+- Reverse generation drops extra fields with a notice (reverse layouts get their own) and mirrors sectors as a starting point
 
 ## Key Features
 
 - **Auto-adjust mode** — editing a segment's `end_m` automatically updates next segment's `start_m`
 - **Reverse track generation** — mirrors positions (`start_m = trackLen - oldEnd_m`) and inverts corner numbers
 - **Offset preview** — non-destructive visualization with modulo wraparound; "Apply Permanently" commits changes
-- **Sectors (optional)** — toggle-gated S1/S2 boundary inputs; validated separately from segments; omitted from export when off
+- **Sectors (required)** — S1/S2 boundary inputs, validated separately from segments; export is blocked until valid
+- **Unknown fields preserved** — anything the editor does not understand round-trips unchanged
 - **Custom modal/toast system** — app-level modals for alert/confirm/prompt; toasts auto-dismiss at 2.5s
 - **Move animations** — CSS bounce+scale on segment move, flash overlay
 

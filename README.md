@@ -21,6 +21,8 @@ No build step, no install, no backend.
 - **Auto-adjust** toggle: editing `end_m` automatically updates the next segment's `start_m`
 - Full validation on every edit: required fields, range checks, overlap detection, out-of-bounds
 - `complex_corner` validation enforces increasing consecutive turn numbers (e.g. `5,6,7`)
+- Corner numbers are checked across the whole file (1, 2, 3... in lap order), and sector boundaries are required, matching what Pits n' Giggles accepts
+- Fields the editor does not understand (e.g. brake boards, DRS zones) are kept and written back unchanged
 - **Reverse track generation**: mirrors segment positions and inverts corner numbers
 - **Offset control**: non-destructively preview a track alignment shift, then apply permanently
 - Load JSON via file upload or paste; export via download or copy to clipboard

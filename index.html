@@ -48,6 +48,42 @@
     let _counter = 0;
     function makeId() { return `seg_${++_counter}_${Math.random().toString(36).slice(2,7)}`; }
 
+    // Fields the editor understands. Anything else is carried through untouched, so files
+    // written by newer tools (e.g. brake boards, DRS zones) survive a load/save round trip.
+    const KNOWN_TOP_KEYS = new Set(["circuit_name", "circuit_number", "track_length", "segments", "sectors"]);
+    const KNOWN_SEG_KEYS = new Set(["type", "name", "start_m", "end_m", "corner_number", "corner_numbers"]);
+
+    function isPlainObject(v) {
+      return typeof v === "object" && v !== null && !Array.isArray(v);
+    }
+
+    function pickExtra(obj, known) {
+      const out = {};
+      for (const [k, v] of Object.entries(obj || {})) if (!known.has(k)) out[k] = v;
+      return out;
+    }
+
+    function hasExtra(extra) {
+      return isPlainObject(extra) && Object.keys(extra).length > 0;
+    }
+
+    // Sub-corners only mean something on a complex corner and brake boards on a corner, so a type
+    // change drops the one that no longer applies.
+    function extraForType(extra, type) {
+      const out = { ...extra };
+      if (type !== "complex_corner") delete out.corners;
+      if (type !== "corner") delete out.brake_boards;
+      return out;
+    }
+
+    // Keys in the order the source file had them, then any new keys.
+    function orderKeys(obj, order) {
+      const out = {};
+      for (const k of order || []) if (k in obj) out[k] = obj[k];
+      for (const k of Object.keys(obj)) if (!(k in out)) out[k] = obj[k];
+      return out;
+    }
+
     function makeSegment(prevEndM = 0, type = "corner") {
       return {
         _id: makeId(),
@@ -57,6 +93,8 @@
         end_m: prevEndM + 100,
         corner_number: "",
         corner_numbers_raw: "",
+        _extra: {},
+        _keyOrder: [],
       };
     }
 
@@ -74,8 +112,8 @@
 
     // ─── Validation ─────────────────────────────────────────────────────────────
 
-    function validateSectors(sectorsEnabled, s1, s2, trackLength) {
-      if (!sectorsEnabled) return {};
+    // Sectors are required: Pits n' Giggles refuses to load a track file without them.
+    function validateSectors(s1, s2, trackLength) {
       const errors = {};
       const s1n = Number(s1);
       const s2n = Number(s2);
@@ -105,10 +143,42 @@
       return errors;
     }
 
+    // Mirrors lib/track_segments_classifier: corners are numbered 1, 2, 3... in lap order.
+    function cornerSequenceError(n, expected) {
+      if (n === expected) return null;
+      if (n < expected) return `Corner ${n} is a duplicate or out of order (expected ${expected})`;
+      const missing = n - 1 === expected ? `${expected}` : `${expected}–${n - 1}`;
+      return `Corner numbers must have no gaps: missing ${missing} before ${n}`;
+    }
+
+    // Mirrors lib/track_segments_classifier: when a complex corner carries `corners` (not editable here),
+    // they must stay numbered like corner_numbers and tile the segment exactly. Returns [field, message] or null.
+    function subCornerError(seg, nums) {
+      const subs = seg._extra && seg._extra.corners;
+      if (!Array.isArray(subs) || subs.length === 0) return null;
+      const numbers = subs.map(c => c.corner_number);
+      if (numbers.length !== nums.length || numbers.some((n, i) => n !== nums[i])) {
+        return ["corner_numbers", `Sub-corners are numbered ${numbers.join(", ")}; they must match corner_numbers`];
+      }
+      if (subs[0].start_m !== Number(seg.start_m)) {
+        return ["start_m", `Sub-corners (corners) start at ${subs[0].start_m}, not here`];
+      }
+      if (subs[subs.length - 1].end_m !== Number(seg.end_m)) {
+        return ["end_m", `Sub-corners (corners) end at ${subs[subs.length - 1].end_m}, not here`];
+      }
+      for (let i = 1; i < subs.length; i++) {
+        if (subs[i].start_m !== subs[i - 1].end_m) {
+          return ["corner_numbers", `Sub-corner ${subs[i].corner_number} does not start where ${subs[i - 1].corner_number} ends`];
+        }
+      }
+      return null;
+    }
+
     function validate(segments, trackLength = "") {
       const trackLen = Number(trackLength);
       const hasValidTrackLen = trackLength !== "" && !isNaN(trackLen) && trackLen > 0;
       const errors = {};
+      let expectedCorner = 1;
       segments.forEach((seg, i) => {
         const e = {};
         if (seg.type === "straight" && !seg.name.trim()) {
@@ -119,14 +189,30 @@
         if (!e.start_m && !e.end_m && Number(seg.start_m) >= Number(seg.end_m)) {
           e.end_m = "Must be greater than start_m";
         }
-        if (seg.type === "corner" && (seg.corner_number === "" || isNaN(Number(seg.corner_number)))) {
-          e.corner_number = "Required";
+        if (seg.type === "corner") {
+          const n = Number(seg.corner_number);
+          if (seg.corner_number === "" || isNaN(n)) e.corner_number = "Required";
+          else if (!Number.isInteger(n))            e.corner_number = "Must be an integer";
+          else {
+            const msg = cornerSequenceError(n, expectedCorner);
+            if (msg) e.corner_number = msg;
+            expectedCorner = Math.max(expectedCorner, n + 1);
+          }
         }
         if (seg.type === "complex_corner") {
           const nums = parseCornerNumbers(seg.corner_numbers_raw);
-          if (nums.length === 0)                                      e.corner_numbers = "Required, non-empty";
-          else if (nums.some(n => !Number.isInteger(n) || isNaN(n))) e.corner_numbers = "All values must be integers";
-          else if (!isIncreasingConsecutive(nums))                    e.corner_numbers = "Must be increasing and consecutive (e.g. 5,6,7)";
+          const allInts = nums.length > 0 && nums.every(n => Number.isInteger(n));
+          if (nums.length === 0)                     e.corner_numbers = "Required, non-empty";
+          else if (!allInts)                         e.corner_numbers = "All values must be integers";
+          else if (nums.length < 2)                  e.corner_numbers = "Needs at least 2 corners (use a corner segment for one)";
+          else if (!isIncreasingConsecutive(nums))   e.corner_numbers = "Must be increasing and consecutive (e.g. 5,6,7)";
+          else {
+            const msg = cornerSequenceError(nums[0], expectedCorner);
+            if (msg) e.corner_numbers = msg;
+          }
+          if (allInts) expectedCorner = Math.max(expectedCorner, Math.max(...nums) + 1);
+          const sub = !e.start_m && !e.end_m && allInts && subCornerError(seg, nums);
+          if (sub && !e[sub[0]]) e[sub[0]] = sub[1];
         }
         if (i > 0 && !e.start_m) {
           const prev = segments[i - 1];
@@ -196,28 +282,32 @@
         })
         .reverse();
 
-      return {
+      const out = {
         circuit_name: newName,
         circuit_number: Number(newNumber),
         track_length: trackLen,
         segments: reversed,
       };
+      // Mirrored sector boundaries are only a starting point for the reverse layout.
+      if (trackData.sectors) {
+        out.sectors = { s1: trackLen - trackData.sectors.s2, s2: trackLen - trackData.sectors.s1 };
+      }
+      return out;
     }
 
     // ─── Export / Import ─────────────────────────────────────────────────────────
 
-    function exportSegment(seg) {
+    // Call as exportSegment(seg) or exportSegment(seg, false), never via .map(exportSegment):
+    // map would pass the array index as includeExtra.
+    function exportSegment(seg, includeExtra = true) {
       const out = { type: seg.type, start_m: Number(seg.start_m), end_m: Number(seg.end_m) };
-      if (seg.type === "straight") out.name = seg.name.trim();
-      if (seg.type === "corner") {
-        out.name = seg.name.trim();
-        out.corner_number = Number(seg.corner_number);
-      }
-      if (seg.type === "complex_corner") {
-        if (seg.name.trim()) out.name = seg.name.trim();
-        out.corner_numbers = parseCornerNumbers(seg.corner_numbers_raw);
-      }
-      return out;
+      // Straights need a name; for the rest an empty one is left out, as lib/track_segments_classifier writes it.
+      const name = seg.name.trim();
+      if (seg.type === "straight" || name) out.name = name;
+      if (seg.type === "corner") out.corner_number = Number(seg.corner_number);
+      if (seg.type === "complex_corner") out.corner_numbers = parseCornerNumbers(seg.corner_numbers_raw);
+      if (!includeExtra) return out;
+      return orderKeys({ ...out, ...(seg._extra || {}) }, seg._keyOrder);
     }
 
     function importSegment(seg) {
@@ -229,7 +319,25 @@
         end_m: seg.end_m ?? "",
         corner_number: seg.corner_number ?? "",
         corner_numbers_raw: Array.isArray(seg.corner_numbers) ? seg.corner_numbers.join(", ") : "",
+        _extra: pickExtra(seg, KNOWN_SEG_KEYS),
+        _keyOrder: Object.keys(seg),
       };
+    }
+
+    // The one place an exported file is built, used by Copy JSON and Download JSON.
+    function buildPayload({ circuitName, circuitNumber, trackLength, segments, s1, s2, extraTop, topKeyOrder }) {
+      const known = {
+        circuit_name: String(circuitName).trim(),
+        circuit_number: Number(circuitNumber),
+        track_length: Number(trackLength),
+        segments: segments.map(seg => exportSegment(seg)),
+        sectors: { s1: Number(s1), s2: Number(s2) },
+      };
+      return orderKeys({ ...known, ...(extraTop || {}) }, topKeyOrder);
+    }
+
+    function hasGeneratedData(extraTop, segments) {
+      return hasExtra(extraTop) || segments.some(seg => hasExtra(seg._extra));
     }
 
     function validateLoadedData(data) {
@@ -258,6 +366,8 @@
         end_m: seg?.end_m ?? "",
         corner_number: seg?.corner_number ?? "",
         corner_numbers_raw: typeof seg?.corner_numbers_raw === "string" ? seg.corner_numbers_raw : "",
+        _extra: isPlainObject(seg?._extra) ? seg._extra : {},
+        _keyOrder: Array.isArray(seg?._keyOrder) ? seg._keyOrder.filter(k => typeof k === "string") : [],
       };
     }
 
@@ -387,9 +497,10 @@
       githubModalOpen: false,
       loadedFileName: "",
       needsTrackLength: false,
-      sectorsEnabled: false,
       s1: "",
       s2: "",
+      extraTop: {},
+      topKeyOrder: [],
     };
 
     function loadInitialState() {
@@ -419,9 +530,10 @@
           segments,
           autoAdjust: typeof parsed.autoAdjust === "boolean" ? parsed.autoAdjust : false,
           errors: validate(segments, trackLength),
-          sectorsEnabled: typeof parsed.sectorsEnabled === "boolean" ? parsed.sectorsEnabled : false,
           s1: (typeof parsed.s1 === "string" || typeof parsed.s1 === "number") ? String(parsed.s1) : "",
           s2: (typeof parsed.s2 === "string" || typeof parsed.s2 === "number") ? String(parsed.s2) : "",
+          extraTop: isPlainObject(parsed.extraTop) ? parsed.extraTop : {},
+          topKeyOrder: Array.isArray(parsed.topKeyOrder) ? parsed.topKeyOrder.filter(k => typeof k === "string") : [],
         };
       } catch (err) {
         console.warn("Failed to restore saved editor state:", err);
@@ -438,8 +550,6 @@
           return { ...state, circuitNumber: action.value };
         case "TOGGLE_AUTO_ADJUST":
           return { ...state, autoAdjust: !state.autoAdjust };
-        case "SET_SECTORS_ENABLED":
-          return { ...state, sectorsEnabled: action.value };
         case "SET_S1":
           return { ...state, s1: action.value };
         case "SET_S2":
@@ -461,6 +571,7 @@
           const updated = segments.map(s => s._id !== action.id ? s : {
             _id: s._id, type: action.newType, name: s.name,
             start_m: s.start_m, end_m: s.end_m, corner_number: "", corner_numbers_raw: "",
+            _extra: extraForType(s._extra, action.newType), _keyOrder: s._keyOrder,
           });
           return { ...state, segments: updated, errors: validate(updated, state.trackLength) };
         }
@@ -531,9 +642,10 @@
             loadModalOpen: false,
             githubModalOpen: false,
             loadedFileName: action.fileName || "",
-            sectorsEnabled: hasSectors,
             s1: hasSectors ? String(loadedSectors.s1) : "",
             s2: hasSectors ? String(loadedSectors.s2) : "",
+            extraTop: pickExtra(action.data, KNOWN_TOP_KEYS),
+            topKeyOrder: Object.keys(action.data),
           };
         }
 
@@ -1130,7 +1242,7 @@
 
     function App() {
       const [state, dispatch] = useReducer(reducer, undefined, loadInitialState);
-      const { circuitName, circuitNumber, trackLength, segments, autoAdjust, errors, loadModalOpen, githubModalOpen, loadedFileName, needsTrackLength, sectorsEnabled, s1, s2 } = state;
+      const { circuitName, circuitNumber, trackLength, segments, autoAdjust, errors, loadModalOpen, githubModalOpen, loadedFileName, needsTrackLength, s1, s2, extraTop, topKeyOrder } = state;
       // ids: Set of segment _ids to flash; tick increments on every move to restart animation even for same segment
       const [moveAnim, setMoveAnim] = useState({ ids: new Set(), tick: 0 });
       const [offset, setOffset] = useState(0);
@@ -1162,7 +1274,7 @@
         setToast({ id: ++modalIdRef.current, message, variant });
       };
 
-      const sectorErrors = validateSectors(sectorsEnabled, s1, s2, trackLength);
+      const sectorErrors = validateSectors(s1, s2, trackLength);
       const hasSectorErrors = Object.keys(sectorErrors).length > 0;
       const totalErrorCount = Object.keys(errors).length;
       const errorSegmentIds = segments
@@ -1171,12 +1283,12 @@
 
       useEffect(() => {
         try {
-          const snapshot = { circuitName, circuitNumber, trackLength, segments, autoAdjust, sectorsEnabled, s1, s2 };
+          const snapshot = { circuitName, circuitNumber, trackLength, segments, autoAdjust, s1, s2, extraTop, topKeyOrder };
           localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot));
         } catch (err) {
           console.warn("Failed to persist editor state:", err);
         }
-      }, [circuitName, circuitNumber, trackLength, segments, autoAdjust, sectorsEnabled, s1, s2]);
+      }, [circuitName, circuitNumber, trackLength, segments, autoAdjust, s1, s2, extraTop, topKeyOrder]);
 
       useEffect(() => {
         if (!needsTrackLength) return;
@@ -1237,15 +1349,10 @@
           await showAlert("Sector boundaries have validation errors. Please fix them before copying JSON.");
           return;
         }
-        const payload = {
-          circuit_name: circuitName.trim(),
-          circuit_number: Number(circuitNumber),
-          track_length: trackLengthNum,
-          segments: segments.map(exportSegment),
-        };
-        if (sectorsEnabled) {
-          payload.sectors = { s1: Number(s1), s2: Number(s2) };
+        if (totalErrorCount > 0) {
+          if (!await showConfirm(`There are ${totalErrorCount} segment(s) with validation errors. Pits n' Giggles will refuse to load this file. Copy anyway?`)) return;
         }
+        const payload = buildPayload(state);
         try {
           await navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
           showToast("JSON copied to clipboard!");
@@ -1264,6 +1371,10 @@
           await showAlert("Track length must be defined before generating a reverse track.");
           return;
         }
+        if (hasSectorErrors) {
+          await showAlert("Sector boundaries have validation errors. Please fix them before generating a reverse track.");
+          return;
+        }
         if (!await showConfirm("This will create a new track with reversed segment positions and order. Continue?")) return;
 
         const newName = await showPrompt("Enter circuit_name for the reversed track:");
@@ -1274,11 +1385,13 @@
         const newNumber = Number(newNumberStr);
         if (isNaN(newNumber)) { await showAlert("Invalid circuit_number."); return; }
 
+        // Extra data (brake boards, zones...) is not mirrored: reverse layouts get their own.
         const trackData = {
           circuit_name: circuitName,
           circuit_number: Number(circuitNumber),
           track_length: trackLengthNum,
-          segments: segments.map(exportSegment),
+          segments: segments.map(seg => exportSegment(seg, false)),
+          sectors: { s1: Number(s1), s2: Number(s2) },
         };
 
         let reversed;
@@ -1289,7 +1402,14 @@
           return;
         }
 
-        await showAlert("Segment names may not be semantically correct in reverse direction. Please review.");
+        const notes = [
+          "Segment names may not be semantically correct in reverse direction.",
+          "Sector boundaries were mirrored as a starting point. Check them against the game.",
+        ];
+        if (hasGeneratedData(extraTop, segments)) {
+          notes.push("Other data in this file (e.g. brake boards, DRS zones) was not carried over. Reverse layouts get their own.");
+        }
+        await showAlert(notes.join("\n\n") + "\n\nPlease review.");
         dispatch({ type: "LOAD_JSON", data: reversed, fileName: "" });
       };
 
@@ -1307,17 +1427,9 @@
           return;
         }
         if (totalErrorCount > 0) {
-          if (!await showConfirm(`There are ${totalErrorCount} segment(s) with validation errors. Export anyway?`)) return;
+          if (!await showConfirm(`There are ${totalErrorCount} segment(s) with validation errors. Pits n' Giggles will refuse to load this file. Export anyway?`)) return;
         }
-        const payload = {
-          circuit_name: circuitName.trim(),
-          circuit_number: Number(circuitNumber),
-          track_length: trackLengthNum,
-          segments: segments.map(exportSegment),
-        };
-        if (sectorsEnabled) {
-          payload.sectors = { s1: Number(s1), s2: Number(s2) };
-        }
+        const payload = buildPayload(state);
         const defaultName = loadedFileName || `${circuitName.trim().replace(/\s+/g, "_")}.json`;
         const chosenName = await showPrompt("Save as:", defaultName);
         if (!chosenName) return;
@@ -1336,6 +1448,10 @@
       const handleApplyOffset = async () => {
         if (!trackLengthValid) { await showAlert("Track length must be defined to apply offset."); return; }
         if (offset === 0) return;
+        if (hasGeneratedData(extraTop, segments)) {
+          await showAlert("This file has other position data (e.g. brake boards, DRS zones) that the offset would not shift. Remove that data or regenerate it before applying an offset.");
+          return;
+        }
         if (!await showConfirm(`Apply offset of ${offset}m to all segments? This will modify all start_m / end_m values and cannot be undone.`)) return;
         dispatch({ type: "APPLY_OFFSET", offset, trackLen: trackLengthNum });
         setOffset(0);
@@ -1431,18 +1547,10 @@
 
                   {/* Sectors */}
                   <div className="flex flex-wrap items-center gap-3 mt-3 pt-2 border-t border-zinc-800">
-                    <label className="flex items-center gap-1.5 text-sm cursor-pointer select-none">
-                      <input
-                        type="checkbox"
-                        checked={sectorsEnabled}
-                        onChange={e => dispatch({ type: "SET_SECTORS_ENABLED", value: e.target.checked })}
-                        className="accent-red-600"
-                      />
+                    <span className="flex items-center gap-1.5 text-sm select-none">
                       <span className="text-zinc-300 font-medium">Sectors</span>
-                      <span className="text-xs text-zinc-600">(optional)</span>
-                    </label>
-                    {sectorsEnabled && (
-                      <>
+                      <span className="text-red-500">*</span>
+                    </span>
                         <div className="flex items-center gap-1.5">
                           <label className="text-sm text-zinc-400 whitespace-nowrap">S1 boundary (m)</label>
                           <div>
@@ -1471,8 +1579,6 @@
                             {sectorErrors.s2 && <p className="text-xs text-red-400 mt-0.5">{sectorErrors.s2}</p>}
                           </div>
                         </div>
-                      </>
-                    )}
                   </div>
 
                   {/* Offset control */}

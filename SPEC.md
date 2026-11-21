@@ -81,10 +81,11 @@ type TrackData = {
   circuit_number: number
   track_length: number
   segments: Segment[]
-  sectors?: {        // optional — omitted entirely when not configured
+  sectors: {         // required: Pits n' Giggles refuses to load a file without it
     s1: number       // integer, meters; end of sector 1
     s2: number       // integer, meters; end of sector 2
   }
+  // Any other field is carried through untouched, in its original key order.
 }
 ```
 
@@ -110,21 +111,20 @@ type TrackData = {
   * `circuit_name` (text input, required)
   * `circuit_number` (number input, required)
   * `track_length` (number input, required)
-  * **Sectors (Optional)** — see below
+  * **Sectors (required)** — see below
   * Offset control — non-destructive preview with modulo wraparound; "Apply Permanently" commits
 
 ---
 
-## 1a. Sectors (Optional)
+## 1a. Sectors (Required)
 
 Shown in the collapsible header section.
 
-* **Enable sectors** checkbox/toggle
-* When enabled, two integer inputs appear:
+* Two required integer inputs:
   * `S1 boundary (m)` — end of sector 1
   * `S2 boundary (m)` — end of sector 2
-* When disabled — inputs hidden, `sectors` omitted from export
-* When loading JSON that contains `sectors` — toggle auto-enables and fields pre-fill
+* When loading JSON that contains `sectors` — fields pre-fill
+* When loading JSON without `sectors` — fields show as required, and export is blocked until filled
 
 ---
 
@@ -356,9 +356,21 @@ Error if violated:
 
 ---
 
+## 3a. Corner Numbering Validation
+
+Matches Pits n' Giggles, which rejects the whole file otherwise:
+
+* `corner` and `complex_corner` numbers together run 1, 2, 3... in segment order
+* No gaps, repeats or out-of-order numbers
+* `corner_number` must be an integer
+* A `complex_corner` needs at least 2 numbers
+* A `complex_corner` that carries `corners` (sub-corners, kept untouched) must have them numbered like `corner_numbers`, starting at its `start_m`, ending at its `end_m` and each starting where the previous ends
+
+---
+
 ## 4. Sector Validation
 
-When sectors are enabled:
+Always applies:
 
 ```
 s1 > 0
@@ -390,16 +402,19 @@ s1 and s2 must be integers (no floats)
 * Paste JSON OR upload file
 * Validate before accepting
 * Show errors if invalid
-* If `sectors` present → auto-enable toggle and pre-fill `s1` / `s2`
-* If `sectors` absent → toggle remains disabled
+* If `sectors` present → pre-fill `s1` / `s2`
+* If `sectors` absent → `s1` / `s2` show as required
+* Fields the editor does not understand are kept, at top level and per segment
 
 ---
 
 ## Export
 
-* Clean JSON only — no internal fields (`_id`, `corner_numbers_raw`)
-* `sectors` included only when toggle is enabled and values are valid
-* `sectors` omitted entirely (not `null`, not `{}`) when toggle is off
+* Clean JSON only — no internal fields (`_id`, `corner_numbers_raw`, `_extra`, `_keyOrder`)
+* `sectors` always included; export blocked until valid
+* Unknown fields written back unchanged, keys in the source file's order, so an unedited file round-trips unchanged
+* `name` is always written for straights and omitted when empty on corners and complex corners, as Pits n' Giggles writes it
+* Exporting with segment errors asks for confirmation, warning that Pits n' Giggles will refuse the file
 * Format: 2-space indentation
 
 ---
@@ -445,11 +460,15 @@ When enabled:
 
 ---
 
-### C. Sectors toggle
+### C. Sectors
 
-* Optional track-level metadata
+* Required track-level metadata
 * Does not affect segment layout or validation
-* When disabled: no `sectors` key in output
+
+### D. Reverse track and offset with unknown fields
+
+* Reverse generation mirrors sectors (`s1' = L - s2`, `s2' = L - s1`) as a starting point, and drops unknown fields with a notice: reverse layouts get their own
+* Offset is blocked when the file has unknown fields, since it would not shift their positions
 
 ---
 
@@ -489,8 +508,9 @@ When enabled:
   * Insert anywhere
   * Convert types
   * Reorder segments
-  * Optionally configure sector boundaries (S1, S2)
+  * Configure sector boundaries (S1, S2), which are required
   * Load existing JSON with or without sectors
+  * Load and save files with fields the editor does not understand, without losing them
   * Fetch an existing track definition from the public GitHub repo (branch +
     file selection) with no Git install, then edit and save it locally
 
@@ -498,7 +518,7 @@ When enabled:
 
   * Prevents invalid schema
   * Detects overlap/order issues
-  * Validates sector boundaries (integer, ordered, within track length) when enabled
+  * Validates sector boundaries (required, integer, ordered, within track length)
+  * Validates corner numbering across the whole file, as Pits n' Giggles does
   * Blocks export if sector errors exist
-  * Omits `sectors` entirely from output when toggle is off
   * Exports valid JSON for Python system
