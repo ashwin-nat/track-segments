@@ -85,9 +85,22 @@ type TrackData = {
     s1: number       // integer, meters; end of sector 1
     s2: number       // integer, meters; end of sector 2
   }
-  // Any other field is carried through untouched, in its original key order.
+  speed_trap_m?: number
+  drs_zones?: { id: number, detection_m: number, activation: { start_m: number, end_m: number }[] }[]
+  overtake_dist?: { detection_m: number, activation_m: number }   // one per track
+  active_aero_zones?: { mode: "full" | "partial", start_m: number, end_m: number }[]
+  // Any other field is carried through untouched, but flagged: Pits n' Giggles refuses it.
 }
+
+// On a corner segment:
+brake_boards?: { distance_m: 50 | 100 | 150 | 200 | 250 | 300, at_m: number, side: "left" | "right" | "both" }[]
+// On a complex_corner segment; numbered like corner_numbers and tiling the segment exactly:
+corners?: { corner_number: number, name?: string, start_m: number, end_m: number, brake_boards?: BrakeBoard[] }[]
 ```
+
+The schema is `lib/track_segments_classifier` in Pits n' Giggles; the editor mirrors its rules. Every value
+above that is a lap distance is in `[0, track_length)`. Zones may cross the start line (`end_m < start_m`),
+segments may not. Top-level keys are written in the order that library writes them.
 
 ---
 
@@ -155,6 +168,21 @@ the repo or installing Git.
 
 ---
 
+## 1c. Zones and Points panel
+
+Collapsible card above the segment list, with a summary and an error badge.
+
+* **Speed trap** at the top: one input; empty means none. Every game uses it
+* **F1 26** (collapsible):
+  * **Overtake**: detection and activation inputs, or "+ Overtake" when the track has none
+  * **Active aero zones**: mode (full / partial), start, end
+* **F1 25 and F2** (collapsible):
+  * **DRS zones**: id, detection, and one or more activation ranges each; a new zone takes the next free id
+* Each collapsible group shows its count and error badge, and starts open only when it has errors
+* None of these move when segments do
+
+---
+
 ## 2. Segment List
 
 * Vertical list of segment cards
@@ -197,6 +225,7 @@ Each segment is a **self-contained editable block**
 ### If `corner`
 
 * `corner_number` (number input)
+* Brake boards: one row per board (distance, `at_m`, side), "+ Board" to add. `at_m` is where the board stands
 
 ---
 
@@ -212,6 +241,12 @@ Each segment is a **self-contained editable block**
     ```id="n2zpl7"
     5,6,7
     ```
+* Sub-corners: a collapsible box. "Split into sub-corners" makes one per corner number, evenly spaced
+  * Each row: corner number, optional name, start (the previous boundary) and end; the last end is the segment end
+  * Changing an end moves the next start with it; the first start and last end follow the segment's own range
+  * A same-length change to `corner_numbers` renumbers them; any other change offers "Rebuild from corner_numbers", keeping names and boards by corner number
+  * Each sub-corner has its own brake boards box; a complex corner has no boards of its own
+  * "Remove sub-corners" asks first when boards would go with them
 
 ---
 
@@ -364,7 +399,7 @@ Matches Pits n' Giggles, which rejects the whole file otherwise:
 * No gaps, repeats or out-of-order numbers
 * `corner_number` must be an integer
 * A `complex_corner` needs at least 2 numbers
-* A `complex_corner` that carries `corners` (sub-corners, kept untouched) must have them numbered like `corner_numbers`, starting at its `start_m`, ending at its `end_m` and each starting where the previous ends
+* A `complex_corner` that carries `corners` (sub-corners) must have them numbered like `corner_numbers`, starting at its `start_m`, ending at its `end_m` and each starting where the previous ends
 
 ---
 
@@ -385,13 +420,28 @@ s1 and s2 must be integers (no floats)
 
 ---
 
+## 4a. Zones, Points and Boards
+
+Matches Pits n' Giggles, which rejects the whole file otherwise:
+
+* Every lap distance is required, numeric and in `[0, track_length)`
+* A zone may cross the start line but may not be empty (`start_m` equal to `end_m`)
+* DRS zone ids are unique whole numbers; each zone has at least one activation range
+* Aero mode is `full` or `partial`; board distance is 50 to 300 in 50s; board side is left, right or both
+* Sub-corners match `corner_numbers`, start at the segment start, end at its end, and each starts where the previous ends; their boards are checked like corner boards
+* Unknown fields, at top level or on a segment, are kept and flagged
+* Loading refuses a file whose zones or boards carry unknown fields, since the editor would drop them
+
+---
+
 ## 5. Error Display
 
 * Inline field errors (red border)
 * Segment-level error badge
+* Zones and Points panel badge
 * Global error summary at top:
 
-  * “X errors found”
+  * “X segments with errors · Y zone or point errors”
 
 ---
 
@@ -414,7 +464,8 @@ s1 and s2 must be integers (no floats)
 * `sectors` always included; export blocked until valid
 * Unknown fields written back unchanged, keys in the source file's order, so an unedited file round-trips unchanged
 * `name` is always written for straights and omitted when empty on corners and complex corners, as Pits n' Giggles writes it
-* Exporting with segment errors asks for confirmation, warning that Pits n' Giggles will refuse the file
+* Export is blocked while any segment, zone, point or board error remains, since Pits n' Giggles would refuse the file
+* `drs_zones` and `active_aero_zones` are written when non-empty or when the loaded file had them
 * Format: 2-space indentation
 
 ---
@@ -465,10 +516,10 @@ When enabled:
 * Required track-level metadata
 * Does not affect segment layout or validation
 
-### D. Reverse track and offset with unknown fields
+### D. Reverse track and offset with zones, points, boards or unknown fields
 
-* Reverse generation mirrors sectors (`s1' = L - s2`, `s2' = L - s1`) as a starting point, and drops unknown fields with a notice: reverse layouts get their own
-* Offset is blocked when the file has unknown fields, since it would not shift their positions
+* Reverse generation mirrors sectors (`s1' = L - s2`, `s2' = L - s1`) as a starting point, and drops zones, points, boards and unknown fields with a notice: reverse layouts get their own
+* Offset is blocked when the file has any of them, since it would not shift their positions
 
 ---
 
@@ -511,6 +562,7 @@ When enabled:
   * Configure sector boundaries (S1, S2), which are required
   * Load existing JSON with or without sectors
   * Load and save files with fields the editor does not understand, without losing them
+  * Edit the speed trap, overtake points, DRS zones, active aero zones, sub-corners and brake boards
   * Fetch an existing track definition from the public GitHub repo (branch +
     file selection) with no Git install, then edit and save it locally
 
@@ -520,5 +572,6 @@ When enabled:
   * Detects overlap/order issues
   * Validates sector boundaries (required, integer, ordered, within track length)
   * Validates corner numbering across the whole file, as Pits n' Giggles does
-  * Blocks export if sector errors exist
+  * Flags every zone, point, board or field Pits n' Giggles would refuse
+  * Blocks export while any validation error exists
   * Exports valid JSON for Python system

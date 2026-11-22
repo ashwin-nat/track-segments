@@ -22,7 +22,10 @@ No build step, no install, no backend.
 - Full validation on every edit: required fields, range checks, overlap detection, out-of-bounds
 - `complex_corner` validation enforces increasing consecutive turn numbers (e.g. `5,6,7`)
 - Corner numbers are checked across the whole file (1, 2, 3... in lap order), and sector boundaries are required, matching what Pits n' Giggles accepts
-- Fields the editor does not understand (e.g. brake boards, DRS zones) are kept and written back unchanged
+- **Zones and points**: edit the speed trap, overtake detection and activation, DRS zones and active aero zones
+- **Brake boards** on each corner: distance, position on the lap and side of the track
+- **Sub-corners**: split a complex corner into one part per corner number, move the boundaries between them, name them, and give each its own brake boards
+- Every value Pits n' Giggles would refuse is flagged, so a saved file loads there; fields the editor does not know are kept but flagged
 - **Reverse track generation**: mirrors segment positions and inverts corner numbers
 - **Offset control**: non-destructively preview a track alignment shift, then apply permanently
 - Load JSON via file upload or paste; export via download or copy to clipboard

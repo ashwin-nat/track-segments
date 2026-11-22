@@ -48,13 +48,111 @@
     let _counter = 0;
     function makeId() { return `seg_${++_counter}_${Math.random().toString(36).slice(2,7)}`; }
 
-    // Fields the editor understands. Anything else is carried through untouched, so files
-    // written by newer tools (e.g. brake boards, DRS zones) survive a load/save round trip.
-    const KNOWN_TOP_KEYS = new Set(["circuit_name", "circuit_number", "track_length", "segments", "sectors"]);
-    const KNOWN_SEG_KEYS = new Set(["type", "name", "start_m", "end_m", "corner_number", "corner_numbers"]);
+    // Fields the editor understands. Anything else is carried through untouched, and flagged when
+    // Pits n' Giggles would refuse it.
+    const KNOWN_TOP_KEYS = new Set(["circuit_name", "circuit_number", "track_length", "segments", "sectors",
+      "speed_trap_m", "drs_zones", "overtake_dist", "active_aero_zones"]);
+    const KNOWN_SEG_KEYS = new Set(["type", "name", "start_m", "end_m", "corner_number", "corner_numbers", "brake_boards", "corners"]);
+    // Top-level key order lib/track_segments_classifier writes, so a saved file matches its output.
+    const LIB_TOP_ORDER = ["circuit_name", "circuit_number", "track_length", "speed_trap_m", "drs_zones",
+      "overtake_dist", "active_aero_zones", "segments", "sectors"];
+    const BOARD_DISTANCES = ["50", "100", "150", "200", "250", "300"];
+    const BOARD_SIDES = ["left", "right", "both"];
+    const AERO_MODES = ["full", "partial"];
+    // Keys Pits n' Giggles accepts inside each nested object; any other key makes it refuse the file.
+    const NESTED_KEYS = {
+      drs_zone: ["id", "detection_m", "activation"],
+      drs_activation: ["start_m", "end_m"],
+      overtake_dist: ["detection_m", "activation_m"],
+      aero_zone: ["mode", "start_m", "end_m"],
+      brake_board: ["distance_m", "at_m", "side"],
+      sub_corner: ["corner_number", "name", "start_m", "end_m", "brake_boards"],
+    };
 
     function isPlainObject(v) {
       return typeof v === "object" && v !== null && !Array.isArray(v);
+    }
+
+    function str(v) {
+      return v === null || v === undefined ? "" : String(v);
+    }
+
+    function replaceById(list, id, patch) {
+      return list.map(x => x._id === id ? { ...x, ...patch } : x);
+    }
+
+    function removeById(list, id) {
+      return list.filter(x => x._id !== id);
+    }
+
+    // Editor shape of the v2 points and zones: strings for inputs, an _id per row. Keeps _ids it is given.
+    function editorMarkers({ speedTrap, drsZones, overtake, aeroZones }) {
+      const list = v => Array.isArray(v) ? v.filter(isPlainObject) : [];
+      const id = v => (typeof v === "string" && v) ? v : makeId();
+      return {
+        speedTrap: str(speedTrap),
+        drsZones: list(drsZones).map(z => ({
+          _id: id(z._id), id: str(z.id), detection_m: str(z.detection_m),
+          activation: list(z.activation).map(a => ({ _id: id(a._id), start_m: str(a.start_m), end_m: str(a.end_m) })),
+        })),
+        overtake: isPlainObject(overtake)
+          ? { detection_m: str(overtake.detection_m), activation_m: str(overtake.activation_m) }
+          : null,
+        aeroZones: list(aeroZones).map(z => ({ _id: id(z._id), mode: str(z.mode), start_m: str(z.start_m), end_m: str(z.end_m) })),
+      };
+    }
+
+    function markersFromFile(data) {
+      return editorMarkers({ speedTrap: data.speed_trap_m, drsZones: data.drs_zones,
+        overtake: data.overtake_dist, aeroZones: data.active_aero_zones });
+    }
+
+    function editorBoards(boards) {
+      if (!Array.isArray(boards)) return [];
+      return boards.filter(isPlainObject).map(b => ({
+        _id: (typeof b._id === "string" && b._id) ? b._id : makeId(),
+        distance_m: str(b.distance_m), at_m: str(b.at_m), side: str(b.side),
+      }));
+    }
+
+    function editorSubCorners(subs) {
+      if (!Array.isArray(subs)) return [];
+      return subs.filter(isPlainObject).map(c => ({
+        _id: (typeof c._id === "string" && c._id) ? c._id : makeId(),
+        corner_number: str(c.corner_number), name: str(c.name), start_m: str(c.start_m), end_m: str(c.end_m),
+        brake_boards: editorBoards(c.brake_boards),
+      }));
+    }
+
+    // One sub-corner per corner number with evenly spaced boundaries; names and boards kept by corner number.
+    function splitSubCorners(start, end, nums, previous = []) {
+      const s = Number(start);
+      const step = (Number(end) - s) / nums.length;
+      return nums.map((n, i) => {
+        const old = previous.find(c => Number(c.corner_number) === n);
+        return {
+          _id: old ? old._id : makeId(), corner_number: String(n), name: old ? old.name : "",
+          start_m: i === 0 ? str(start) : String(Math.round(s + step * i)),
+          end_m: i === nums.length - 1 ? str(end) : String(Math.round(s + step * (i + 1))),
+          brake_boards: old ? old.brake_boards : [],
+        };
+      });
+    }
+
+    // Keeps sub-corners tiling their segment when the segment's range or numbers change.
+    function subCornersFollow(before, seg) {
+      const subs = seg.sub_corners || [];
+      if (subs.length === 0) return seg;
+      let next = subs;
+      if (seg.start_m !== before.start_m) next = next.map((c, i) => i === 0 ? { ...c, start_m: seg.start_m } : c);
+      if (seg.end_m !== before.end_m) next = next.map((c, i) => i === next.length - 1 ? { ...c, end_m: seg.end_m } : c);
+      if (seg.corner_numbers_raw !== before.corner_numbers_raw) {
+        const nums = parseCornerNumbers(seg.corner_numbers_raw);
+        if (nums.length === next.length && nums.every(Number.isInteger)) {
+          next = next.map((c, i) => ({ ...c, corner_number: String(nums[i]) }));
+        }
+      }
+      return next === subs ? seg : { ...seg, sub_corners: next };
     }
 
     function pickExtra(obj, known) {
@@ -67,12 +165,10 @@
       return isPlainObject(extra) && Object.keys(extra).length > 0;
     }
 
-    // Sub-corners only mean something on a complex corner and brake boards on a corner, so a type
-    // change drops the one that no longer applies.
+    // Sub-corners only mean something on a complex corner, so a type change drops them.
     function extraForType(extra, type) {
       const out = { ...extra };
       if (type !== "complex_corner") delete out.corners;
-      if (type !== "corner") delete out.brake_boards;
       return out;
     }
 
@@ -93,6 +189,8 @@
         end_m: prevEndM + 100,
         corner_number: "",
         corner_numbers_raw: "",
+        brake_boards: [],
+        sub_corners: [],
         _extra: {},
         _keyOrder: [],
       };
@@ -151,27 +249,126 @@
       return `Corner numbers must have no gaps: missing ${missing} before ${n}`;
     }
 
-    // Mirrors lib/track_segments_classifier: when a complex corner carries `corners` (not editable here),
-    // they must stay numbered like corner_numbers and tile the segment exactly. Returns [field, message] or null.
-    function subCornerError(seg, nums) {
-      const subs = seg._extra && seg._extra.corners;
-      if (!Array.isArray(subs) || subs.length === 0) return null;
-      const numbers = subs.map(c => c.corner_number);
-      if (numbers.length !== nums.length || numbers.some((n, i) => n !== nums[i])) {
-        return ["corner_numbers", `Sub-corners are numbered ${numbers.join(", ")}; they must match corner_numbers`];
-      }
-      if (subs[0].start_m !== Number(seg.start_m)) {
-        return ["start_m", `Sub-corners (corners) start at ${subs[0].start_m}, not here`];
-      }
-      if (subs[subs.length - 1].end_m !== Number(seg.end_m)) {
-        return ["end_m", `Sub-corners (corners) end at ${subs[subs.length - 1].end_m}, not here`];
-      }
-      for (let i = 1; i < subs.length; i++) {
-        if (subs[i].start_m !== subs[i - 1].end_m) {
-          return ["corner_numbers", `Sub-corner ${subs[i].corner_number} does not start where ${subs[i - 1].corner_number} ends`];
-        }
-      }
+    // Mirrors lib/track_segments_classifier: every v2 lap distance is in [0, track_length).
+    function lapPositionError(raw, trackLen, hasTrackLen) {
+      if (raw === "" || raw === null || raw === undefined) return "Required";
+      const n = Number(raw);
+      if (!Number.isFinite(n)) return "Must be a number";
+      if (n < 0) return "Must be ≥ 0";
+      if (hasTrackLen && n >= trackLen) return `Must be < track_length (${trackLen})`;
       return null;
+    }
+
+    function rangeErrors(zone, trackLen, hasTrackLen) {
+      const e = {};
+      const s = lapPositionError(zone.start_m, trackLen, hasTrackLen);
+      const en = lapPositionError(zone.end_m, trackLen, hasTrackLen);
+      if (s) e.start_m = s;
+      if (en) e.end_m = en;
+      // end_m below start_m is allowed: the zone crosses the start line.
+      if (!s && !en && Number(zone.start_m) === Number(zone.end_m)) e.end_m = "Must differ from start_m";
+      return e;
+    }
+
+    function boardErrors(board, trackLen, hasTrackLen) {
+      const e = {};
+      if (!BOARD_DISTANCES.includes(str(board.distance_m))) e.distance_m = `Must be ${BOARD_DISTANCES.join(", ")}`;
+      const at = lapPositionError(board.at_m, trackLen, hasTrackLen);
+      if (at) e.at_m = at;
+      if (!BOARD_SIDES.includes(board.side)) e.side = "Must be left, right or both";
+      return e;
+    }
+
+    function boardListErrors(boards, trackLen, hasTrackLen) {
+      const out = {};
+      for (const b of boards || []) {
+        const one = boardErrors(b, trackLen, hasTrackLen);
+        if (hasMessages(one)) out[b._id] = one;
+      }
+      return out;
+    }
+
+    // Mirrors lib/track_segments_classifier: sub-corners match corner_numbers and tile the segment exactly.
+    // Returns { general, subs: { [sub _id]: field errors } }.
+    function subCornerErrors(seg, nums, trackLen, hasTrackLen) {
+      const subs = seg.sub_corners || [];
+      const out = { subs: {} };
+      if (subs.length === 0) return out;
+      const numbers = subs.map(c => Number(c.corner_number));
+      if (numbers.length !== nums.length || numbers.some((n, i) => n !== nums[i])) {
+        out.general = `Sub-corners are ${subs.map(c => "T" + c.corner_number).join(", ")}; they must match corner_numbers`;
+      }
+      subs.forEach((c, i) => {
+        const e = {};
+        const start = Number(c.start_m);
+        const end = Number(c.end_m);
+        const want = i === 0 ? Number(seg.start_m) : Number(subs[i - 1].end_m);
+        if (c.start_m === "" || start !== want) {
+          e.start_m = i === 0 ? `Must start at the segment start (${seg.start_m})` : `Must start where T${subs[i - 1].corner_number} ends`;
+        }
+        if (c.end_m === "" || !Number.isFinite(end)) e.end_m = "Required";
+        else if (!(start < end)) e.end_m = "Must be greater than its start";
+        else if (i === subs.length - 1 && end !== Number(seg.end_m)) e.end_m = `Must end at the segment end (${seg.end_m})`;
+        const be = boardListErrors(c.brake_boards, trackLen, hasTrackLen);
+        if (hasMessages(be)) e.brake_boards = be;
+        if (hasMessages(e)) out.subs[c._id] = e;
+      });
+      return out;
+    }
+
+    function countMessages(v) {
+      if (typeof v === "string") return 1;
+      if (Array.isArray(v)) return v.reduce((n, x) => n + countMessages(x), 0);
+      if (isPlainObject(v)) return Object.values(v).reduce((n, x) => n + countMessages(x), 0);
+      return 0;
+    }
+
+    function hasMessages(obj) {
+      return countMessages(obj) > 0;
+    }
+
+    // The v2 points and zones, and any top-level field Pits n' Giggles does not know.
+    function validateMarkers({ speedTrap, drsZones, overtake, aeroZones, extraTop }, trackLength = "") {
+      const trackLen = Number(trackLength);
+      const hasTl = trackLength !== "" && !isNaN(trackLen) && trackLen > 0;
+      const pos = raw => lapPositionError(raw, trackLen, hasTl);
+      const errors = { drs: {}, aero: {}, top: [] };
+
+      if (speedTrap !== "") {
+        const m = pos(speedTrap);
+        if (m) errors.speedTrap = m;
+      }
+      if (overtake) {
+        const e = {};
+        for (const f of ["detection_m", "activation_m"]) {
+          const m = pos(overtake[f]);
+          if (m) e[f] = m;
+        }
+        if (hasMessages(e)) errors.overtake = e;
+      }
+      drsZones.forEach(z => {
+        const e = { acts: {} };
+        const n = Number(z.id);
+        if (z.id === "" || !Number.isInteger(n)) e.id = "Must be a whole number";
+        else if (drsZones.filter(o => Number(o.id) === n).length > 1) e.id = "Duplicate id";
+        const d = pos(z.detection_m);
+        if (d) e.detection_m = d;
+        if (z.activation.length === 0) e.activation = "Needs at least one activation range";
+        z.activation.forEach(a => {
+          const ae = rangeErrors(a, trackLen, hasTl);
+          if (hasMessages(ae)) e.acts[a._id] = ae;
+        });
+        if (hasMessages(e)) errors.drs[z._id] = e;
+      });
+      aeroZones.forEach(z => {
+        const e = rangeErrors(z, trackLen, hasTl);
+        if (!AERO_MODES.includes(z.mode)) e.mode = "Must be full or partial";
+        if (hasMessages(e)) errors.aero[z._id] = e;
+      });
+      for (const k of Object.keys(extraTop || {})) {
+        errors.top.push(`Unknown field "${k}": Pits n' Giggles will refuse this file`);
+      }
+      return { errors, count: countMessages(errors) };
     }
 
     function validate(segments, trackLength = "") {
@@ -181,6 +378,13 @@
       let expectedCorner = 1;
       segments.forEach((seg, i) => {
         const e = {};
+        // Kept, but Pits n' Giggles refuses any segment field it does not know.
+        const unknown = Object.keys(seg._extra || {}).filter(k => k !== "segment_id");
+        if (unknown.length) e.extra = `Unknown field "${unknown[0]}": Pits n' Giggles will refuse this file`;
+        if (seg.type === "corner") {
+          const be = boardListErrors(seg.brake_boards, trackLen, hasValidTrackLen);
+          if (hasMessages(be)) e.brake_boards = be;
+        }
         if (seg.type === "straight" && !seg.name.trim()) {
           e.name = "Required";
         }
@@ -211,8 +415,11 @@
             if (msg) e.corner_numbers = msg;
           }
           if (allInts) expectedCorner = Math.max(expectedCorner, Math.max(...nums) + 1);
-          const sub = !e.start_m && !e.end_m && allInts && subCornerError(seg, nums);
-          if (sub && !e[sub[0]]) e[sub[0]] = sub[1];
+          if (!e.start_m && !e.end_m && allInts) {
+            const se = subCornerErrors(seg, nums, trackLen, hasValidTrackLen);
+            if (se.general) e.corners = se.general;
+            if (hasMessages(se.subs)) e.sub_corners = se.subs;
+          }
         }
         if (i > 0 && !e.start_m) {
           const prev = segments[i - 1];
@@ -307,10 +514,28 @@
       if (seg.type === "corner") out.corner_number = Number(seg.corner_number);
       if (seg.type === "complex_corner") out.corner_numbers = parseCornerNumbers(seg.corner_numbers_raw);
       if (!includeExtra) return out;
+      const exportBoards = boards => boards.map(b => ({ distance_m: Number(b.distance_m), at_m: Number(b.at_m), side: b.side }));
+      const boards = seg.brake_boards || [];
+      if (seg.type === "corner" && boards.length > 0) out.brake_boards = exportBoards(boards);
+      const subs = seg.sub_corners || [];
+      if (seg.type === "complex_corner" && subs.length > 0) {
+        out.corners = subs.map(c => {
+          const sub = { corner_number: Number(c.corner_number) };
+          if (c.name.trim()) sub.name = c.name.trim();
+          sub.start_m = Number(c.start_m);
+          sub.end_m = Number(c.end_m);
+          if (c.brake_boards.length > 0) sub.brake_boards = exportBoards(c.brake_boards);
+          return sub;
+        });
+      }
       return orderKeys({ ...out, ...(seg._extra || {}) }, seg._keyOrder);
     }
 
     function importSegment(seg) {
+      const extra = pickExtra(seg, KNOWN_SEG_KEYS);
+      // Boards belong on corners and sub-corners on complex corners; elsewhere they are kept as unknown fields and flagged.
+      if (seg.type !== "corner" && seg.brake_boards !== undefined) extra.brake_boards = seg.brake_boards;
+      if (seg.type !== "complex_corner" && seg.corners !== undefined) extra.corners = seg.corners;
       return {
         _id: makeId(),
         type: seg.type,
@@ -319,25 +544,90 @@
         end_m: seg.end_m ?? "",
         corner_number: seg.corner_number ?? "",
         corner_numbers_raw: Array.isArray(seg.corner_numbers) ? seg.corner_numbers.join(", ") : "",
-        _extra: pickExtra(seg, KNOWN_SEG_KEYS),
+        brake_boards: seg.type === "corner" ? editorBoards(seg.brake_boards) : [],
+        sub_corners: seg.type === "complex_corner" ? editorSubCorners(seg.corners) : [],
+        _extra: extra,
         _keyOrder: Object.keys(seg),
       };
     }
 
     // The one place an exported file is built, used by Copy JSON and Download JSON.
-    function buildPayload({ circuitName, circuitNumber, trackLength, segments, s1, s2, extraTop, topKeyOrder }) {
+    function buildPayload({ circuitName, circuitNumber, trackLength, segments, s1, s2, extraTop, topKeyOrder = [],
+                            speedTrap = "", drsZones = [], overtake = null, aeroZones = [] }) {
       const known = {
         circuit_name: String(circuitName).trim(),
         circuit_number: Number(circuitNumber),
         track_length: Number(trackLength),
-        segments: segments.map(seg => exportSegment(seg)),
-        sectors: { s1: Number(s1), s2: Number(s2) },
       };
-      return orderKeys({ ...known, ...(extraTop || {}) }, topKeyOrder);
+      if (speedTrap !== "") known.speed_trap_m = Number(speedTrap);
+      // Pits n' Giggles always writes both zone lists; a file that had neither keeps having neither.
+      if (drsZones.length > 0 || topKeyOrder.includes("drs_zones")) {
+        known.drs_zones = drsZones.map(z => ({
+          id: Number(z.id), detection_m: Number(z.detection_m),
+          activation: z.activation.map(a => ({ start_m: Number(a.start_m), end_m: Number(a.end_m) })),
+        }));
+      }
+      if (overtake) {
+        known.overtake_dist = { detection_m: Number(overtake.detection_m), activation_m: Number(overtake.activation_m) };
+      }
+      if (aeroZones.length > 0 || topKeyOrder.includes("active_aero_zones")) {
+        known.active_aero_zones = aeroZones.map(z => ({ mode: z.mode, start_m: Number(z.start_m), end_m: Number(z.end_m) }));
+      }
+      known.segments = segments.map(seg => exportSegment(seg));
+      known.sectors = { s1: Number(s1), s2: Number(s2) };
+      return orderKeys({ ...known, ...(extraTop || {}) }, [...LIB_TOP_ORDER, ...topKeyOrder]);
     }
 
-    function hasGeneratedData(extraTop, segments) {
-      return hasExtra(extraTop) || segments.some(seg => hasExtra(seg._extra));
+    // Lap positions the offset would not shift and the reverse would not mirror.
+    function hasPositionData({ extraTop, segments, speedTrap, drsZones, overtake, aeroZones }) {
+      return hasExtra(extraTop) || speedTrap !== "" || overtake !== null || drsZones.length > 0 || aeroZones.length > 0
+        || segments.some(seg => hasExtra(seg._extra) || (seg.brake_boards || []).length > 0 || (seg.sub_corners || []).length > 0);
+    }
+
+    function unknownKeyError(obj, allowed, label) {
+      if (!isPlainObject(obj)) return `${label} must be an object`;
+      const bad = Object.keys(obj).find(k => !allowed.includes(k));
+      return bad ? `${label}: unknown field "${bad}"` : null;
+    }
+
+    function loadedBoardsError(boards, label) {
+      if (boards == null) return null;
+      if (!Array.isArray(boards)) return `${label}: brake_boards must be an array`;
+      for (let j = 0; j < boards.length; j++) {
+        const err = unknownKeyError(boards[j], NESTED_KEYS.brake_board, `${label} brake_boards[${j}]`);
+        if (err) return err;
+      }
+      return null;
+    }
+
+    // Rejects v2 data the editor could not show without losing part of it.
+    function validateLoadedMarkers(data) {
+      if (data.speed_trap_m != null && typeof data.speed_trap_m !== "number") return "speed_trap_m must be a number";
+      if (data.drs_zones != null) {
+        if (!Array.isArray(data.drs_zones)) return "drs_zones must be an array";
+        for (let i = 0; i < data.drs_zones.length; i++) {
+          const z = data.drs_zones[i];
+          const err = unknownKeyError(z, NESTED_KEYS.drs_zone, `drs_zones[${i}]`);
+          if (err) return err;
+          if (!Array.isArray(z.activation)) return `drs_zones[${i}].activation must be an array`;
+          for (let j = 0; j < z.activation.length; j++) {
+            const aerr = unknownKeyError(z.activation[j], NESTED_KEYS.drs_activation, `drs_zones[${i}].activation[${j}]`);
+            if (aerr) return aerr;
+          }
+        }
+      }
+      if (data.overtake_dist != null) {
+        const err = unknownKeyError(data.overtake_dist, NESTED_KEYS.overtake_dist, "overtake_dist");
+        if (err) return err;
+      }
+      if (data.active_aero_zones != null) {
+        if (!Array.isArray(data.active_aero_zones)) return "active_aero_zones must be an array";
+        for (let i = 0; i < data.active_aero_zones.length; i++) {
+          const err = unknownKeyError(data.active_aero_zones[i], NESTED_KEYS.aero_zone, `active_aero_zones[${i}]`);
+          if (err) return err;
+        }
+      }
+      return null;
     }
 
     function validateLoadedData(data) {
@@ -347,17 +637,40 @@
       if (!Array.isArray(data.segments)) return "segments must be an array";
       for (let i = 0; i < data.segments.length; i++) {
         const s = data.segments[i];
+        if (!isPlainObject(s)) return `Segment ${i} must be an object`;
         if (!["straight", "corner", "complex_corner"].includes(s.type)) {
           return `Segment ${i}: unknown type "${s.type}"`;
         }
+        const boardsErr = loadedBoardsError(s.brake_boards, `Segment ${i}`);
+        if (boardsErr) return boardsErr;
+        if (s.corners != null) {
+          if (!Array.isArray(s.corners)) return `Segment ${i}: corners must be an array`;
+          for (let j = 0; j < s.corners.length; j++) {
+            const label = `Segment ${i} corners[${j}]`;
+            const err = unknownKeyError(s.corners[j], NESTED_KEYS.sub_corner, label) || loadedBoardsError(s.corners[j].brake_boards, label);
+            if (err) return err;
+          }
+        }
       }
-      return null;
+      return validateLoadedMarkers(data);
     }
 
     const STORAGE_KEY = "track-segment-editor.state.v1";
 
     function normalizePersistedSegment(seg) {
       const type = ["straight", "corner", "complex_corner"].includes(seg?.type) ? seg.type : "corner";
+      const extra = isPlainObject(seg?._extra) ? { ...seg._extra } : {};
+      // Snapshots from before the editor knew brake boards and sub-corners kept them in _extra.
+      let boards = seg?.brake_boards;
+      if (!Array.isArray(boards) && type === "corner" && Array.isArray(extra.brake_boards)) {
+        boards = extra.brake_boards;
+        delete extra.brake_boards;
+      }
+      let subs = seg?.sub_corners;
+      if (!Array.isArray(subs) && type === "complex_corner" && Array.isArray(extra.corners)) {
+        subs = extra.corners;
+        delete extra.corners;
+      }
       return {
         _id: typeof seg?._id === "string" && seg._id ? seg._id : makeId(),
         type,
@@ -366,7 +679,9 @@
         end_m: seg?.end_m ?? "",
         corner_number: seg?.corner_number ?? "",
         corner_numbers_raw: typeof seg?.corner_numbers_raw === "string" ? seg.corner_numbers_raw : "",
-        _extra: isPlainObject(seg?._extra) ? seg._extra : {},
+        brake_boards: editorBoards(boards),
+        sub_corners: editorSubCorners(subs),
+        _extra: extra,
         _keyOrder: Array.isArray(seg?._keyOrder) ? seg._keyOrder.filter(k => typeof k === "string") : [],
       };
     }
@@ -501,6 +816,10 @@
       s2: "",
       extraTop: {},
       topKeyOrder: [],
+      speedTrap: "",
+      drsZones: [],
+      overtake: null,
+      aeroZones: [],
     };
 
     function loadInitialState() {
@@ -520,6 +839,11 @@
           ? String(parsed.trackLength)
           : "";
 
+        // Snapshots from before the editor knew the v2 points and zones kept them in extraTop.
+        const extraTop = isPlainObject(parsed.extraTop) ? { ...parsed.extraTop } : {};
+        const markers = "drsZones" in parsed ? editorMarkers(parsed) : markersFromFile(extraTop);
+        for (const k of ["speed_trap_m", "drs_zones", "overtake_dist", "active_aero_zones"]) delete extraTop[k];
+
         return {
           ...initialState,
           circuitName: typeof parsed.circuitName === "string" ? parsed.circuitName : "",
@@ -532,8 +856,9 @@
           errors: validate(segments, trackLength),
           s1: (typeof parsed.s1 === "string" || typeof parsed.s1 === "number") ? String(parsed.s1) : "",
           s2: (typeof parsed.s2 === "string" || typeof parsed.s2 === "number") ? String(parsed.s2) : "",
-          extraTop: isPlainObject(parsed.extraTop) ? parsed.extraTop : {},
+          extraTop,
           topKeyOrder: Array.isArray(parsed.topKeyOrder) ? parsed.topKeyOrder.filter(k => typeof k === "string") : [],
+          ...markers,
         };
       } catch (err) {
         console.warn("Failed to restore saved editor state:", err);
@@ -554,6 +879,19 @@
           return { ...state, s1: action.value };
         case "SET_S2":
           return { ...state, s2: action.value };
+        // value: any of { speedTrap, drsZones, overtake, aeroZones }, validated in App like the sectors.
+        case "SET_MARKERS":
+          return { ...state, ...action.value };
+
+        case "SET_BRAKE_BOARDS": {
+          const updated = segments.map(s => s._id === action.id ? { ...s, brake_boards: action.boards } : s);
+          return { ...state, segments: updated, errors: validate(updated, state.trackLength) };
+        }
+
+        case "SET_SUB_CORNERS": {
+          const updated = segments.map(s => s._id === action.id ? { ...s, sub_corners: action.subs } : s);
+          return { ...state, segments: updated, errors: validate(updated, state.trackLength) };
+        }
 
         case "UPDATE_SEGMENT": {
           const { id, field, value } = action;
@@ -564,6 +902,7 @@
               updated = updated.map((s, i) => i === idx + 1 ? { ...s, start_m: value } : s);
             }
           }
+          updated = updated.map((s, i) => s === segments[i] ? s : subCornersFollow(segments[i], s));
           return { ...state, segments: updated, errors: validate(updated, state.trackLength) };
         }
 
@@ -571,6 +910,8 @@
           const updated = segments.map(s => s._id !== action.id ? s : {
             _id: s._id, type: action.newType, name: s.name,
             start_m: s.start_m, end_m: s.end_m, corner_number: "", corner_numbers_raw: "",
+            brake_boards: action.newType === "corner" ? (s.brake_boards || []) : [],
+            sub_corners: action.newType === "complex_corner" ? (s.sub_corners || []) : [],
             _extra: extraForType(s._extra, action.newType), _keyOrder: s._keyOrder,
           });
           return { ...state, segments: updated, errors: validate(updated, state.trackLength) };
@@ -646,6 +987,7 @@
             s2: hasSectors ? String(loadedSectors.s2) : "",
             extraTop: pickExtra(action.data, KNOWN_TOP_KEYS),
             topKeyOrder: Object.keys(action.data),
+            ...markersFromFile(action.data),
           };
         }
 
@@ -747,6 +1089,174 @@
       );
     }
 
+    const SMALL_BTN = "px-2 py-0.5 border border-zinc-700 rounded text-xs text-zinc-400 hover:border-red-600 hover:text-red-400 transition-colors";
+
+    function smallInputCls(hasError, width) {
+      return `border rounded px-2 py-1 text-sm bg-zinc-800 text-white ${width} focus:outline-none focus:ring-1 focus:ring-red-500 placeholder-zinc-600 ${
+        hasError ? "border-red-500" : "border-zinc-600"
+      }`;
+    }
+
+    // A lap distance input with its error under it.
+    function NumField({ label, value, error, onChange, placeholder, width = "w-24" }) {
+      // Fixed width so a long error wraps instead of pushing the row's other fields sideways.
+      return (
+        <div className={width}>
+          {label && <label className="block text-xs text-zinc-500 mb-0.5">{label}</label>}
+          <input type="number" step="any" value={value} placeholder={placeholder}
+            className={smallInputCls(!!error, width)}
+            onChange={e => onChange(e.target.value)} />
+          <FieldError msg={error} />
+        </div>
+      );
+    }
+
+    // A fixed-choice select. A loaded value outside the choices stays visible, so its error makes sense.
+    function ChoiceField({ label, value, options, error, onChange, format = v => v }) {
+      return (
+        <div>
+          {label && <label className="block text-xs text-zinc-500 mb-0.5">{label}</label>}
+          <select value={value} className={smallInputCls(!!error, "")} onChange={e => onChange(e.target.value)}>
+            {!options.includes(value) && <option value={value}>{value || "–"}</option>}
+            {options.map(o => <option key={o} value={o}>{format(o)}</option>)}
+          </select>
+          <FieldError msg={error} />
+        </div>
+      );
+    }
+
+    function RemoveButton({ onClick, label }) {
+      return (
+        <button onClick={onClick} title={label} aria-label={label}
+          className="mt-0.5 px-1.5 py-0.5 border border-zinc-700 rounded text-xs text-zinc-500 hover:border-red-600 hover:text-red-500 transition-colors">
+          <i className="bi bi-x-lg" />
+        </button>
+      );
+    }
+
+    // A collapsible box inside a card. Collapsed by default; one that starts with errors starts open.
+    function SubBox({ title, count, issues, hint, actions, open, setOpen, children }) {
+      return (
+        <div className={`mt-2 rounded border ${issues ? "border-red-800" : "border-zinc-800"}`} style={{ backgroundColor: "#141414" }}>
+          <div className="flex flex-wrap items-center gap-2 px-2 py-1">
+            <button onClick={() => setOpen(o => !o)} className="flex items-center gap-1.5 text-xs font-medium text-zinc-400 hover:text-zinc-200">
+              <i className={`bi ${open ? "bi-chevron-down" : "bi-chevron-right"}`} />
+              {title} <span className="font-normal text-zinc-500">({count})</span>
+            </button>
+            {issues > 0 && (
+              <span className="text-xs bg-red-950 text-red-400 px-1.5 py-0.5 rounded-full font-medium border border-red-800">{issues}!</span>
+            )}
+            {hint && <InfoHint text={hint} />}
+            <div className="ml-auto flex gap-1">{actions}</div>
+          </div>
+          {open && <div className="px-2 pb-1.5">{children}</div>}
+        </div>
+      );
+    }
+
+    function BrakeBoards({ boards, errors, onChange }) {
+      const issues = countMessages(errors);
+      const [open, setOpen] = useState(() => issues > 0);
+      const add = () => {
+        onChange([...boards, { _id: makeId(), distance_m: "100", at_m: "", side: "left" }]);
+        setOpen(true);
+      };
+      return (
+        <SubBox title="Brake boards" count={boards.length} issues={issues} open={open} setOpen={setOpen}
+          hint={"Each row: distance on the board, at_m (where the board stands on the lap, not where it points to), side.\n\nBoards do not move when the corner does."}
+          actions={<button onClick={add} className={SMALL_BTN}>+ Board</button>}>
+          {boards.map(b => {
+            const e = errors[b._id] || {};
+            return (
+              <div key={b._id} className="flex flex-wrap items-start gap-2 mb-1">
+                <ChoiceField value={b.distance_m} options={BOARD_DISTANCES} error={e.distance_m} format={d => `${d} m`}
+                  onChange={v => onChange(replaceById(boards, b._id, { distance_m: v }))} />
+                <NumField value={b.at_m} error={e.at_m} placeholder="at_m"
+                  onChange={v => onChange(replaceById(boards, b._id, { at_m: v }))} />
+                <ChoiceField value={b.side} options={BOARD_SIDES} error={e.side}
+                  onChange={v => onChange(replaceById(boards, b._id, { side: v }))} />
+                <RemoveButton label="Remove board" onClick={() => onChange(removeById(boards, b._id))} />
+              </div>
+            );
+          })}
+        </SubBox>
+      );
+    }
+
+    // A complex corner's sub-corners, each with a name and its own boards. They always tile the segment:
+    // a sub-corner's end is the next one's start, and the first start and last end follow the segment.
+    function SubCorners({ seg, errors, dispatch }) {
+      const subs = seg.sub_corners || [];
+      const subErrors = errors.sub_corners || {};
+      const issues = countMessages(subErrors) + (errors.corners ? 1 : 0);
+      const [open, setOpen] = useState(() => issues > 0);
+      const set = list => dispatch({ type: "SET_SUB_CORNERS", id: seg._id, subs: list });
+
+      const nums = parseCornerNumbers(seg.corner_numbers_raw);
+      const numsOk = nums.length >= 2 && nums.every(Number.isInteger) && isIncreasingConsecutive(nums);
+      const rangeOk = seg.start_m !== "" && seg.end_m !== "" && Number(seg.start_m) < Number(seg.end_m);
+      const mismatch = subs.length > 0 && numsOk
+        && (subs.length !== nums.length || subs.some((c, i) => Number(c.corner_number) !== nums[i]));
+      const boardCount = subs.reduce((n, c) => n + c.brake_boards.length, 0);
+      const split = () => { set(splitSubCorners(seg.start_m, seg.end_m, nums, subs)); setOpen(true); };
+      const setEnd = (i, v) => set(subs.map((c, j) => j === i ? { ...c, end_m: v } : j === i + 1 ? { ...c, start_m: v } : c));
+
+      const actions = <>
+        {subs.length === 0 && (
+          <button onClick={split} disabled={!numsOk || !rangeOk} className={`${SMALL_BTN} disabled:opacity-30 disabled:cursor-not-allowed`}
+            title={numsOk && rangeOk ? "One sub-corner per corner number, evenly spaced" : "Needs valid corner_numbers, start_m and end_m"}>
+            Split into sub-corners
+          </button>
+        )}
+        {mismatch && rangeOk && (
+          <button onClick={split} className={SMALL_BTN} title="Matches corner_numbers again, boundaries evenly spaced; names and boards kept by corner number">
+            Rebuild from corner_numbers
+          </button>
+        )}
+        {subs.length > 0 && (
+          <button className={SMALL_BTN} onClick={() => {
+            if (boardCount === 0 || window.confirm(`Remove ${subs.length} sub-corners and their ${boardCount} brake board(s)?`)) set([]);
+          }}>
+            {boardCount > 0 ? `Remove sub-corners and ${boardCount} board${boardCount > 1 ? "s" : ""}` : "Remove sub-corners"}
+          </button>
+        )}
+      </>;
+
+      return (
+        <SubBox title="Sub-corners" count={subs.length} issues={issues} open={open} setOpen={setOpen} actions={actions}
+          hint={"Optional. Splits a complex corner into one part per corner number, so each can carry its own name and brake boards.\n\nA complex corner is one braking event, so its boards usually go on the first sub-corner.\n\nBoundaries move together: changing a sub-corner's end moves the next one's start."}>
+          <FieldError msg={errors.corners} />
+          {subs.length === 0 && (
+            <p className="text-xs text-zinc-500">No sub-corners. A complex corner carries brake boards only through its sub-corners.</p>
+          )}
+          {subs.map((c, i) => {
+            const e = subErrors[c._id] || {};
+            const last = i === subs.length - 1;
+            return (
+              <div key={c._id} className="mb-2 pl-2 border-l border-zinc-700">
+                <div className="flex flex-wrap items-start gap-2">
+                  <span className="text-sm font-mono text-zinc-300 pt-1 w-10">T{c.corner_number}</span>
+                  <input type="text" value={c.name} placeholder="name (opt)"
+                    className={smallInputCls(false, "w-40")}
+                    onChange={ev => set(replaceById(subs, c._id, { name: ev.target.value }))} />
+                  <span className="text-sm text-zinc-400 pt-1 font-mono">{c.start_m} {"→"}</span>
+                  {last ? (
+                    <span className="text-sm text-zinc-400 pt-1 font-mono">{c.end_m} <span className="text-xs text-zinc-600">(segment end)</span></span>
+                  ) : (
+                    <NumField value={c.end_m} error={e.end_m} placeholder="end_m" onChange={v => setEnd(i, v)} />
+                  )}
+                </div>
+                <FieldError msg={e.start_m} />
+                {last && <FieldError msg={e.end_m} />}
+                <BrakeBoards boards={c.brake_boards} errors={e.brake_boards || {}}
+                  onChange={list => set(replaceById(subs, c._id, { brake_boards: list }))} />
+              </div>
+            );
+          })}
+        </SubBox>
+      );
+    }
+
     function TypeSpecificFields({ seg, errors, dispatch }) {
       if (seg.type === "corner") {
         return (
@@ -761,6 +1271,8 @@
               onChange={e => dispatch({ type: "UPDATE_SEGMENT", id: seg._id, field: "corner_number", value: e.target.value })}
             />
             <FieldError msg={errors.corner_number} />
+            <BrakeBoards boards={seg.brake_boards || []} errors={errors.brake_boards || {}}
+              onChange={list => dispatch({ type: "SET_BRAKE_BOARDS", id: seg._id, boards: list })} />
           </div>
         );
       }
@@ -781,11 +1293,144 @@
               onChange={e => dispatch({ type: "UPDATE_SEGMENT", id: seg._id, field: "corner_numbers_raw", value: e.target.value })}
             />
             <FieldError msg={errors.corner_numbers} />
+            <SubCorners seg={seg} errors={errors} dispatch={dispatch} />
           </div>
         );
       }
 
       return null;
+    }
+
+    // Track-level v2 data: the speed trap, then the F1 26 items (overtake, active aero) and the F1 25 / F2 ones (DRS).
+    function MarkersPanel({ markers, errors, dispatch }) {
+      const { speedTrap, drsZones, overtake, aeroZones } = markers;
+      const [open, setOpen] = useState(true);
+      const set = value => dispatch({ type: "SET_MARKERS", value });
+      const issues = countMessages(errors);
+      const f126Issues = countMessages(errors.overtake) + countMessages(errors.aero);
+      const drsIssues = countMessages(errors.drs);
+      const [f126Open, setF126Open] = useState(() => f126Issues > 0);
+      const [drsOpen, setDrsOpen] = useState(() => drsIssues > 0);
+      const nextDrsId = drsZones.reduce((m, z) => Math.max(m, Number(z.id) || 0), 0) + 1;
+      const summary = [
+        speedTrap !== "" && "speed trap",
+        overtake && "overtake",
+        drsZones.length > 0 && `${drsZones.length} DRS`,
+        aeroZones.length > 0 && `${aeroZones.length} active aero`,
+      ].filter(Boolean).join(" · ") || "none";
+      const title = t => <h3 className="text-xs font-semibold uppercase tracking-wide text-zinc-400 mb-1">{t}</h3>;
+
+      return (
+        <div className="flex items-start gap-2 mb-4">
+          <div className="w-7 flex-shrink-0" />
+          <section className={`flex-1 rounded-lg border-l-4 ${issues ? "border-red-500" : "border-zinc-700"}`} style={{ backgroundColor: "#1a1a1a" }}>
+            <button onClick={() => setOpen(o => !o)} className="w-full flex items-center gap-2 px-3 py-2 text-left">
+              <span className="text-sm font-medium text-zinc-200">Zones and points</span>
+              <span className="text-xs text-zinc-500">{summary}</span>
+              {issues > 0 && (
+                <span className="text-xs bg-red-950 text-red-400 px-1.5 py-0.5 rounded-full font-medium border border-red-800">{issues}!</span>
+              )}
+              <i className={`bi ${open ? "bi-chevron-up" : "bi-chevron-down"} ml-auto text-zinc-400`} />
+            </button>
+
+            {open && (
+              <div className="px-3 pb-3 space-y-3">
+                {errors.top.map(m => <FieldError key={m} msg={m} />)}
+                <p className="text-xs text-zinc-600">
+                  Lap distances in metres, 0 up to track_length. A zone may cross the start line: end_m below start_m.
+                  Nothing here moves when segments do.
+                </p>
+
+                <div>
+                  {title("Speed trap")}
+                  <NumField value={speedTrap} error={errors.speedTrap} placeholder="none"
+                    onChange={v => set({ speedTrap: v })} />
+                </div>
+
+                <SubBox title="F1 26" count={(overtake ? 1 : 0) + aeroZones.length} issues={f126Issues}
+                  open={f126Open} setOpen={setF126Open} hint={"Overtake mode and active aero. Only F1 26 sessions use them."}>
+                <div className="space-y-3 pt-1">
+                <div>
+                  {title("Overtake")}
+                  {overtake ? (
+                    <div className="flex flex-wrap items-start gap-2">
+                      <NumField label="detection_m" value={overtake.detection_m} error={errors.overtake?.detection_m}
+                        onChange={v => set({ overtake: { ...overtake, detection_m: v } })} />
+                      <NumField label="activation_m" value={overtake.activation_m} error={errors.overtake?.activation_m}
+                        onChange={v => set({ overtake: { ...overtake, activation_m: v } })} />
+                      <div className="pt-4"><RemoveButton label="Remove overtake" onClick={() => set({ overtake: null })} /></div>
+                    </div>
+                  ) : (
+                    <button onClick={() => set({ overtake: { detection_m: "", activation_m: "" } })} className={SMALL_BTN}>+ Overtake</button>
+                  )}
+                </div>
+
+                <div>
+                  {title("Active aero zones (mode, start_m, end_m)")}
+                  {aeroZones.map(z => {
+                    const e = errors.aero[z._id] || {};
+                    const update = patch => set({ aeroZones: replaceById(aeroZones, z._id, patch) });
+                    return (
+                      <div key={z._id} className="flex flex-wrap items-start gap-2 mb-1">
+                        <ChoiceField value={z.mode} options={AERO_MODES} error={e.mode} onChange={v => update({ mode: v })} />
+                        <NumField value={z.start_m} error={e.start_m} placeholder="start_m" onChange={v => update({ start_m: v })} />
+                        <NumField value={z.end_m} error={e.end_m} placeholder="end_m" onChange={v => update({ end_m: v })} />
+                        <RemoveButton label="Remove zone" onClick={() => set({ aeroZones: removeById(aeroZones, z._id) })} />
+                      </div>
+                    );
+                  })}
+                  <button className={SMALL_BTN} onClick={() => set({ aeroZones: [...aeroZones, {
+                    _id: makeId(), mode: "full", start_m: "", end_m: "",
+                  }] })}>+ Aero zone</button>
+                </div>
+                </div>
+                </SubBox>
+
+                <SubBox title="F1 25 and F2" count={drsZones.length} issues={drsIssues}
+                  open={drsOpen} setOpen={setDrsOpen} hint={"DRS zones. F1 25 and F2 sessions use them; F1 26 has overtake mode instead."}>
+                <div className="pt-1">
+                  {title("DRS zones")}
+                  {drsZones.map(z => {
+                    const e = errors.drs[z._id] || { acts: {} };
+                    const update = patch => set({ drsZones: replaceById(drsZones, z._id, patch) });
+                    return (
+                      <div key={z._id} className="mb-2 pl-2 border-l border-zinc-700">
+                        <div className="flex flex-wrap items-start gap-2">
+                          <NumField label="id" value={z.id} error={e.id} width="w-16" onChange={v => update({ id: v })} />
+                          <NumField label="detection_m" value={z.detection_m} error={e.detection_m}
+                            onChange={v => update({ detection_m: v })} />
+                          <div className="pt-4"><RemoveButton label="Remove DRS zone" onClick={() => set({ drsZones: removeById(drsZones, z._id) })} /></div>
+                        </div>
+                        <div className="mt-1">
+                          <span className="text-xs text-zinc-500 mr-2">activation (start_m, end_m)</span>
+                          <button onClick={() => update({ activation: [...z.activation, { _id: makeId(), start_m: "", end_m: "" }] })}
+                            className={SMALL_BTN}>+ Range</button>
+                          <FieldError msg={e.activation} />
+                          {z.activation.map(a => {
+                            const ae = (e.acts || {})[a._id] || {};
+                            const updateAct = patch => update({ activation: replaceById(z.activation, a._id, patch) });
+                            return (
+                              <div key={a._id} className="flex flex-wrap items-start gap-2 mt-1">
+                                <NumField value={a.start_m} error={ae.start_m} placeholder="start_m" onChange={v => updateAct({ start_m: v })} />
+                                <NumField value={a.end_m} error={ae.end_m} placeholder="end_m" onChange={v => updateAct({ end_m: v })} />
+                                <RemoveButton label="Remove range" onClick={() => update({ activation: removeById(z.activation, a._id) })} />
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })}
+                  <button className={SMALL_BTN} onClick={() => set({ drsZones: [...drsZones, {
+                    _id: makeId(), id: String(nextDrsId), detection_m: "", activation: [{ _id: makeId(), start_m: "", end_m: "" }],
+                  }] })}>+ DRS zone</button>
+                </div>
+                </SubBox>
+              </div>
+            )}
+          </section>
+        </div>
+      );
     }
 
     function offsetDisplay(value, offset, trackLen) {
@@ -870,11 +1515,12 @@
               </div>
 
               {/* Inline field errors */}
-              {(e.name || e.start_m || e.end_m) && (
+              {(e.name || e.start_m || e.end_m || e.extra) && (
                 <div className="flex flex-wrap gap-x-4 mt-0.5">
                   {e.name    && <FieldError msg={`name: ${e.name}`} />}
                   {e.start_m && <FieldError msg={`start: ${e.start_m}`} />}
                   {e.end_m   && <FieldError msg={`end: ${e.end_m}`} />}
+                  {e.extra   && <FieldError msg={e.extra} />}
                 </div>
               )}
 
@@ -1242,7 +1888,7 @@
 
     function App() {
       const [state, dispatch] = useReducer(reducer, undefined, loadInitialState);
-      const { circuitName, circuitNumber, trackLength, segments, autoAdjust, errors, loadModalOpen, githubModalOpen, loadedFileName, needsTrackLength, s1, s2, extraTop, topKeyOrder } = state;
+      const { circuitName, circuitNumber, trackLength, segments, autoAdjust, errors, loadModalOpen, githubModalOpen, loadedFileName, needsTrackLength, s1, s2, extraTop, topKeyOrder, speedTrap, drsZones, overtake, aeroZones } = state;
       // ids: Set of segment _ids to flash; tick increments on every move to restart animation even for same segment
       const [moveAnim, setMoveAnim] = useState({ ids: new Set(), tick: 0 });
       const [offset, setOffset] = useState(0);
@@ -1277,18 +1923,25 @@
       const sectorErrors = validateSectors(s1, s2, trackLength);
       const hasSectorErrors = Object.keys(sectorErrors).length > 0;
       const totalErrorCount = Object.keys(errors).length;
+      const { errors: markerErrors, count: markerErrorCount } = validateMarkers(state, trackLength);
+      const errorSummary = [
+        totalErrorCount > 0 && `${totalErrorCount} segment${totalErrorCount > 1 ? "s" : ""} with errors`,
+        markerErrorCount > 0 && `${markerErrorCount} zone or point error${markerErrorCount > 1 ? "s" : ""}`,
+      ].filter(Boolean).join(" · ");
       const errorSegmentIds = segments
         .filter(seg => Object.keys(errors[seg._id] || {}).length > 0)
         .map(seg => seg._id);
 
       useEffect(() => {
         try {
-          const snapshot = { circuitName, circuitNumber, trackLength, segments, autoAdjust, s1, s2, extraTop, topKeyOrder };
+          const snapshot = { circuitName, circuitNumber, trackLength, segments, autoAdjust, s1, s2, extraTop, topKeyOrder,
+            speedTrap, drsZones, overtake, aeroZones };
           localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot));
         } catch (err) {
           console.warn("Failed to persist editor state:", err);
         }
-      }, [circuitName, circuitNumber, trackLength, segments, autoAdjust, s1, s2, extraTop, topKeyOrder]);
+      }, [circuitName, circuitNumber, trackLength, segments, autoAdjust, s1, s2, extraTop, topKeyOrder,
+          speedTrap, drsZones, overtake, aeroZones]);
 
       useEffect(() => {
         if (!needsTrackLength) return;
@@ -1349,8 +2002,9 @@
           await showAlert("Sector boundaries have validation errors. Please fix them before copying JSON.");
           return;
         }
-        if (totalErrorCount > 0) {
-          if (!await showConfirm(`There are ${totalErrorCount} segment(s) with validation errors. Pits n' Giggles will refuse to load this file. Copy anyway?`)) return;
+        if (errorSummary) {
+          await showAlert(`There are validation errors (${errorSummary}). Pits n' Giggles would refuse to load this file. Please fix them before copying JSON.`);
+          return;
         }
         const payload = buildPayload(state);
         try {
@@ -1406,8 +2060,8 @@
           "Segment names may not be semantically correct in reverse direction.",
           "Sector boundaries were mirrored as a starting point. Check them against the game.",
         ];
-        if (hasGeneratedData(extraTop, segments)) {
-          notes.push("Other data in this file (e.g. brake boards, DRS zones) was not carried over. Reverse layouts get their own.");
+        if (hasPositionData(state)) {
+          notes.push("Zones, points, brake boards and other data in this file were not carried over. Reverse layouts get their own.");
         }
         await showAlert(notes.join("\n\n") + "\n\nPlease review.");
         dispatch({ type: "LOAD_JSON", data: reversed, fileName: "" });
@@ -1426,8 +2080,9 @@
           await showAlert("Sector boundaries have validation errors. Please fix them before saving.");
           return;
         }
-        if (totalErrorCount > 0) {
-          if (!await showConfirm(`There are ${totalErrorCount} segment(s) with validation errors. Pits n' Giggles will refuse to load this file. Export anyway?`)) return;
+        if (errorSummary) {
+          await showAlert(`There are validation errors (${errorSummary}). Pits n' Giggles would refuse to load this file. Please fix them before saving.`);
+          return;
         }
         const payload = buildPayload(state);
         const defaultName = loadedFileName || `${circuitName.trim().replace(/\s+/g, "_")}.json`;
@@ -1448,8 +2103,8 @@
       const handleApplyOffset = async () => {
         if (!trackLengthValid) { await showAlert("Track length must be defined to apply offset."); return; }
         if (offset === 0) return;
-        if (hasGeneratedData(extraTop, segments)) {
-          await showAlert("This file has other position data (e.g. brake boards, DRS zones) that the offset would not shift. Remove that data or regenerate it before applying an offset.");
+        if (hasPositionData(state)) {
+          await showAlert("This file has zones, points, brake boards or other data that the offset would not shift. Remove that data or regenerate it before applying an offset.");
           return;
         }
         if (!await showConfirm(`Apply offset of ${offset}m to all segments? This will modify all start_m / end_m values and cannot be undone.`)) return;
@@ -1634,9 +2289,9 @@
             </div>
 
             {/* Global error banner */}
-            {totalErrorCount > 0 && (
+            {errorSummary && (
               <div className="bg-red-950 border-t border-red-900 px-4 py-1.5 text-sm text-red-400 font-medium text-center">
-                {totalErrorCount} segment{totalErrorCount > 1 ? "s" : ""} with errors
+                {errorSummary}
               </div>
             )}
           </header>
@@ -1656,6 +2311,8 @@
               </div>
             ) : (
               <>
+                <MarkersPanel markers={{ speedTrap, drsZones, overtake, aeroZones }} errors={markerErrors} dispatch={dispatch} />
+
                 {/* Total count header — indented to align with cards */}
                 <div className="flex items-center gap-2 mb-4">
                   <div className="w-8 flex-shrink-0" />
@@ -1663,7 +2320,7 @@
                     Total:{" "}
                     <span className="text-white font-semibold text-base">{segments.length}</span>
                     {" "}segment{segments.length > 1 ? "s" : ""}
-                    {totalErrorCount === 0 && (
+                    {!errorSummary && (
                       <span className="ml-2 text-green-500 font-medium">✓ All valid</span>
                     )}
                   </p>
